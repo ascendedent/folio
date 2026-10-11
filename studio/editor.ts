@@ -1,4 +1,4 @@
-import { caretOffset, runsFromElement, runsToHtml, selectionOffsets, setCaret, setRange } from "./caret.js";
+import { caretOffset, offsetOf, pointAt, runsFromElement, runsToHtml, selectionOffsets, setCaret, setRange } from "./caret.js";
 import type { Store } from "./state.js";
 import { readFountain } from "../src/fountain/parse.js";
 import { assemblyOf, sceneIdOf } from "../src/production.js";
@@ -39,6 +39,12 @@ const PLACEHOLDER: Partial<Record<ElementKind, string>> = {
   "outline-body": "What this section is about",
 };
 
+/** Copied paragraphs keep their element types when pasted back into Folio. */
+const CLIPBOARD_TYPE = "application/x-folio-paragraphs+json";
+
+type Point = { index: number; offset: number };
+type Span = { from: Point; to: Point };
+
 let styleTarget: ((style: "bold" | "italic" | "underline") => void) | null = null;
 const typingStyle = { bold: false, italic: false, underline: false };
 
@@ -50,10 +56,26 @@ function looksLikeFountain(text: string): boolean {
   return /^(?:int|ext|est|int\.?\/ext|i\/e)[.\s]/imu.test(text);
 }
 
+function htmlFor(runs: readonly TextRun[]): string {
+  // An empty paragraph holds a <br> so the caret can sit in it.
+  return runsToHtml(runs) || "<br>";
+}
+
+function upperRuns(runs: readonly TextRun[]): TextRun[] {
+  return runs.map((run) => ({ ...run, text: run.text.toUpperCase() }));
+}
+
 export function mountEditor(host: HTMLElement, store: Store): () => void {
+  // The whole desk is one editing host, so a selection can run across
+  // paragraphs and pages. Paragraph elements are plain blocks inside it.
   const desk = document.createElement("div");
   desk.className = "desk";
   desk.dataset.testid = "script-desk";
+  desk.contentEditable = "true";
+  desk.spellcheck = true;
+  desk.setAttribute("role", "textbox");
+  desk.setAttribute("aria-multiline", "true");
+  desk.setAttribute("aria-label", "Script");
   host.append(desk);
 
   const suggest = document.createElement("div");
@@ -66,7 +88,157 @@ export function mountEditor(host: HTMLElement, store: Store): () => void {
   let tabWalk: { index: number; from: ElementKind; text: string; previous: ElementKind | null; step: number } | null = null;
   let typeArmed = false;
   let syncing = false;
+  let painting = false;
+  let pointerHeld = false;
   let focused: HTMLElement | null = null;
+  let inputTarget: HTMLElement | null = null;
+  let revisionMark: { offset: number; length: number } | null = null;
+
+  const sliceStartOf = (el: HTMLElement): number => Number(el.dataset.sliceStart ?? 0);
+
+  const paragraphOf = (node: Node | null): HTMLElement | null => {
+    const element = node instanceof HTMLElement ? node : (node?.parentElement ?? null);
+    const found = element?.closest<HTMLElement>(".paragraph") ?? null;
+    return found && desk.contains(found) ? found : null;
+  };
+
+  /** The caret's offset in an element, never past its text. A trailing <br> placeholder does not count. */
+  const caretIn = (el: HTMLElement): number => {
+    const shown = runsFromElement(el).reduce((sum, run) => sum + run.text.length, 0);
+    return Math.min(caretOffset(el), shown);
+  };
+
+  const caretParagraph = (): HTMLElement | null => {
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0) return null;
+    return paragraphOf(selection.focusNode);
+  };
+
+  const elementAt = (point: Point): HTMLElement | undefined => {
+    const matches = [...desk.querySelectorAll<HTMLElement>(`.paragraph[data-index="${point.index}"]`)];
+    return (
+      matches.find((node) => point.offset >= sliceStartOf(node) && point.offset <= Number(node.dataset.sliceEnd ?? 0)) ??
+      matches[matches.length - 1]
+    );
+  };
+
+  /** Where a DOM point falls in the script. A point between paragraphs snaps to the nearest one. */
+  const pointOf = (node: Node, offset: number, edge: "start" | "end"): Point | null => {
+    const el = paragraphOf(node);
+    if (el) {
+      const paragraph = store.script.paragraphs[Number(el.dataset.index)];
+      const length = paragraph ? paragraphText(paragraph).length : 0;
+      return { index: Number(el.dataset.index), offset: Math.min(length, sliceStartOf(el) + offsetOf(el, node, offset)) };
+    }
+    const probe = document.createRange();
+    probe.setStart(node, offset);
+    const all = [...desk.querySelectorAll<HTMLElement>(".paragraph")];
+    if (edge === "start") {
+      const next = all.find((candidate) => probe.comparePoint(candidate, 0) >= 0);
+      return next ? { index: Number(next.dataset.index), offset: sliceStartOf(next) } : null;
+    }
+    const previous = all.reverse().find((candidate) => probe.comparePoint(candidate, candidate.childNodes.length) <= 0);
+    return previous ? { index: Number(previous.dataset.index), offset: Number(previous.dataset.sliceEnd ?? 0) } : null;
+  };
+
+  const modelSpan = (): Span | null => {
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0) return null;
+    const range = selection.getRangeAt(0);
+    if (!desk.contains(range.commonAncestorContainer)) return null;
+    const from = pointOf(range.startContainer, range.startOffset, "start");
+    const to = pointOf(range.endContainer, range.endOffset, "end");
+    if (!from || !to) return null;
+    if (to.index < from.index || (to.index === from.index && to.offset < from.offset)) return { from, to: from };
+    return { from, to };
+  };
+
+  /** True when the selection reaches past one paragraph element, which the browser cannot edit safely. */
+  const crossing = (): boolean => {
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return false;
+    const range = selection.getRangeAt(0);
+    if (!desk.contains(range.commonAncestorContainer)) return false;
+    const start = paragraphOf(range.startContainer);
+    return !start || start !== paragraphOf(range.endContainer);
+  };
+
+  const focusDesk = (): void => {
+    if (document.activeElement !== desk) desk.focus({ preventScroll: true });
+  };
+
+  const selectSpan = (from: Point, to: Point): void => {
+    const a = elementAt(from);
+    const b = elementAt(to);
+    if (!a || !b) return;
+    const start = pointAt(a, from.offset - sliceStartOf(a));
+    const end = pointAt(b, to.offset - sliceStartOf(b));
+    focusDesk();
+    const range = document.createRange();
+    range.setStart(start.node, start.offset);
+    range.setEnd(end.node, end.offset);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+  };
+
+  const spanText = (span: Span): string => {
+    const lines: string[] = [];
+    for (let index = span.from.index; index <= span.to.index; index += 1) {
+      const paragraph = store.script.paragraphs[index];
+      if (!paragraph) continue;
+      const text = paragraphText(paragraph);
+      lines.push(text.slice(index === span.from.index ? span.from.offset : 0, index === span.to.index ? span.to.offset : text.length));
+    }
+    return lines.join("\n");
+  };
+
+  const spanParagraphs = (span: Span): { kind: ElementKind; runs: TextRun[] }[] => {
+    const copied: { kind: ElementKind; runs: TextRun[] }[] = [];
+    for (let index = span.from.index; index <= span.to.index; index += 1) {
+      const paragraph = store.script.paragraphs[index];
+      if (!paragraph) continue;
+      const end = index === span.to.index ? span.to.offset : paragraphText(paragraph).length;
+      const [head] = splitRuns(paragraph.runs, end);
+      const [, piece] = splitRuns(head, index === span.from.index ? span.from.offset : 0);
+      copied.push({ kind: paragraph.kind, runs: joinRuns(piece, []) });
+    }
+    return copied;
+  };
+
+  /** Removes the span from the script. Call inside a transaction. */
+  const removeSpan = (span: Span): Point => {
+    const { from, to } = span;
+    const paragraphs = store.script.paragraphs;
+    const last = paragraphs[to.index];
+    if (!last) return from;
+    if (to.index > from.index && from.offset === 0) {
+      // Whole lines went, so the line that remains keeps its own type.
+      const [, tail] = splitRuns(last.runs, to.offset);
+      last.runs = joinRuns(tail, []);
+      paragraphs.splice(from.index, to.index - from.index);
+      return { index: from.index, offset: 0 };
+    }
+    const first = paragraphs[from.index];
+    if (!first) return from;
+    const [head] = splitRuns(first.runs, from.offset);
+    const [, tail] = splitRuns(last.runs, to.offset);
+    first.runs = joinRuns(head, isUpperKind(first.kind) ? upperRuns(tail) : tail);
+    if (to.index > from.index) paragraphs.splice(from.index + 1, to.index - from.index);
+    return from;
+  };
+
+  const replaceSpan = (span: Span, text: string): void => {
+    store.transact(() => {
+      const at = removeSpan(span);
+      const paragraph = store.script.paragraphs[at.index];
+      if (paragraph && text) {
+        const [left, right] = splitRuns(paragraph.runs, at.offset);
+        paragraph.runs = joinRuns(joinRuns(left, [{ text: isUpperKind(paragraph.kind) ? text.toUpperCase() : text }]), right);
+      }
+      store.caret = { index: at.index, offset: at.offset + text.length };
+    });
+  };
 
   const hideSuggest = (): void => {
     items = [];
@@ -86,7 +258,7 @@ export function mountEditor(host: HTMLElement, store: Store): () => void {
         if (typeArmed) {
           const option = kindOptions()[index];
           if (option && focused) {
-            const caret = caretOffset(focused);
+            const caret = sliceStartOf(focused) + caretIn(focused);
             const paragraphIndex = Number(focused.dataset.index);
             store.transact(() => {
               const current = store.script.paragraphs[paragraphIndex];
@@ -137,7 +309,7 @@ export function mountEditor(host: HTMLElement, store: Store): () => void {
     store.beginBurst();
     paragraph.runs = [{ text: isUpperKind(paragraph.kind) ? value.toUpperCase() : value }];
     syncing = true;
-    el.innerHTML = runsToHtml(paragraph.runs);
+    el.innerHTML = htmlFor(paragraph.runs);
     setCaret(el, paragraphText(paragraph).length);
     syncing = false;
     hideSuggest();
@@ -146,381 +318,530 @@ export function mountEditor(host: HTMLElement, store: Store): () => void {
 
   const writeRuns = (el: HTMLElement, runs: TextRun[], offset: number): void => {
     syncing = true;
-    el.innerHTML = runsToHtml(runs);
+    el.innerHTML = htmlFor(runs);
     setCaret(el, offset);
     syncing = false;
   };
 
   const applyInline = (style: "bold" | "italic" | "underline"): void => {
-    if (!focused) return;
-    const index = Number(focused.dataset.index);
+    if (crossing()) {
+      const span = modelSpan();
+      if (!span) return;
+      store.transact(() => {
+        for (let index = span.from.index; index <= span.to.index; index += 1) {
+          const paragraph = store.script.paragraphs[index];
+          if (!paragraph) continue;
+          const start = index === span.from.index ? span.from.offset : 0;
+          const end = index === span.to.index ? span.to.offset : paragraphText(paragraph).length;
+          if (end > start) paragraph.runs = toggleStyle(paragraph.runs, start, end, style);
+        }
+        store.caret = { ...span.to };
+      });
+      selectSpan(span.from, span.to);
+      return;
+    }
+    const el = caretParagraph() ?? focused;
+    if (!el) return;
+    const index = Number(el.dataset.index);
     const paragraph = store.script.paragraphs[index];
-    const range = selectionOffsets(focused);
+    const range = selectionOffsets(el);
     if (!paragraph || !range) return;
     if (range.start === range.end) {
       typingStyle[style] = !typingStyle[style];
       store.setStatus(`${style[0]?.toUpperCase() ?? ""}${style.slice(1)} ${typingStyle[style] ? "on" : "off"} for new typing`);
       return;
     }
-    const sliceStart = Number(focused.dataset.sliceStart ?? 0);
-    const sliceEnd = Number(focused.dataset.sliceEnd ?? paragraphText(paragraph).length);
+    const sliceStart = sliceStartOf(el);
+    const sliceEnd = Number(el.dataset.sliceEnd ?? paragraphText(paragraph).length);
     store.beginBurst();
     paragraph.runs = toggleStyle(paragraph.runs, sliceStart + range.start, sliceStart + range.end, style);
-    writeRuns(focused, sliceRuns(index, sliceStart, sliceEnd), range.end);
+    writeRuns(el, sliceRuns(index, sliceStart, sliceEnd), range.end);
     store.noteText();
   };
 
-  let block: { start: number; end: number } | null = null;
-  let blockAnchor: number | null = null;
-  let pageTimer = 0;
-  const markBlock = (): void => {
-    desk.querySelectorAll(".row").forEach((row) => row.classList.remove("block-selected"));
-    if (!block) return;
-    for (let index = block.start; index < block.end; index += 1) {
-      desk.querySelector(`.paragraph[data-index="${index}"]`)?.closest(".row")?.classList.add("block-selected");
+  /** Splits the paragraph at offset the way Enter does. Call inside a transaction. */
+  const splitAt = (index: number, offset: number): void => {
+    const paragraph = store.script.paragraphs[index];
+    if (!paragraph) return;
+    const [left, right] = splitRuns(paragraph.runs, offset);
+    const before = left.map((run) => run.text).join("");
+    const atEnd = offset >= paragraphText(paragraph).length;
+    const decision = enterResult(paragraph.kind, before, atEnd);
+    if (decision.become && decision.next === null) {
+      paragraph.runs = joinRuns(left, []);
+      applyKind(paragraph, decision.become);
+      store.caret = { index, offset: paragraphText(paragraph).length };
+      return;
     }
+    paragraph.runs = joinRuns(left, []);
+    const nextKind = decision.next ?? "action";
+    const next = makeParagraph(nextKind, "");
+    next.runs = joinRuns(isUpperKind(nextKind) ? upperRuns(right) : right, []);
+    if (
+      paragraph.dualGroup !== undefined &&
+      (next.kind === "dialogue" || next.kind === "parenthetical" || next.kind === "character")
+    ) {
+      next.dualGroup = paragraph.dualGroup;
+    }
+    store.script.paragraphs.splice(index + 1, 0, next);
+    store.caret = { index: index + 1, offset: 0 };
   };
 
-  const wire = (el: HTMLElement): void => {
-    let revisionMark: { offset: number; length: number } | null = null;
-    el.addEventListener("beforeinput", () => {
-      store.beginBurst();
-      const current = store.script.paragraphs[Number(el.dataset.index)];
-      const length = current ? paragraphText(current).length : 0;
-      const at = Number(el.dataset.sliceStart ?? 0) + caretOffset(el);
-      revisionMark = store.revision ? { offset: at, length } : null;
-      if (typingStyle.bold || typingStyle.italic || typingStyle.underline) {
-        revisionMark = { offset: at, length };
+  const setKinds = (span: Span, kind: ElementKind): void => {
+    store.transact(() => {
+      for (let index = span.from.index; index <= span.to.index; index += 1) {
+        const paragraph = store.script.paragraphs[index];
+        if (paragraph) applyKind(paragraph, kind);
       }
+      store.caret = { ...span.to };
     });
-    el.addEventListener("pointerdown", (event) => {
-      const here = Number(el.dataset.index);
-      if (!event.shiftKey) {
-        block = null;
-        blockAnchor = null;
-        markBlock();
-        return;
+    selectSpan(span.from, span.to);
+  };
+
+  const normalizeLeaving = (el: HTMLElement): void => {
+    if (!el.isConnected) return;
+    const paragraph = store.script.paragraphs[Number(el.dataset.index)];
+    if (!paragraph || paragraph.kind !== "parenthetical") return;
+    const normalized = normalizeParenthetical(paragraphText(paragraph));
+    if (normalized === paragraphText(paragraph)) return;
+    store.beginBurst();
+    paragraph.runs = [{ text: normalized }];
+    syncing = true;
+    el.innerHTML = htmlFor(paragraph.runs);
+    syncing = false;
+    store.noteText();
+  };
+
+  const markCaret = (el: HTMLElement | null): void => {
+    desk.querySelectorAll(".paragraph.is-caret").forEach((node) => node.classList.remove("is-caret"));
+    el?.classList.add("is-caret");
+  };
+
+  // Stands in for focus and blur on single paragraphs.
+  const onSelection = (): void => {
+    if (painting || !desk.isConnected) return;
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0 || !selection.anchorNode || !desk.contains(selection.anchorNode)) return;
+    const el = paragraphOf(selection.focusNode);
+    if (!el) {
+      if (selection.isCollapsed && !pointerHeld) {
+        const node = selection.anchorNode;
+        const point = pointOf(node, selection.anchorOffset, "start") ?? pointOf(node, selection.anchorOffset, "end");
+        if (point) selectSpan(point, point);
       }
-      const anchor = blockAnchor ?? (store.selection?.type === "paragraph" ? store.selection.index : here);
-      blockAnchor = anchor;
-      block = { start: Math.min(anchor, here), end: Math.max(anchor, here) + 1 };
-      markBlock();
-    });
-    el.addEventListener("focus", () => {
-      focused = el;
-      styleTarget = applyInline;
-      if (!block) store.selectParagraph(Number(el.dataset.index));
-      if (store.typewriter) el.scrollIntoView({ block: "center" });
-    });
-    el.addEventListener("input", () => {
-      if (syncing) return;
-      const index = Number(el.dataset.index);
-      const paragraph = store.script.paragraphs[index];
-      if (!paragraph) return;
-      const sliceStart = Number(el.dataset.sliceStart ?? 0);
-      const sliceEnd = Number(el.dataset.sliceEnd ?? paragraphText(paragraph).length);
-      const edited = runsFromElement(el);
-      const localOffset = caretOffset(el);
-      const [head] = splitRuns(paragraph.runs, sliceStart);
-      const [, tail] = splitRuns(paragraph.runs, sliceEnd);
-      let runs = joinRuns(joinRuns(head, edited), tail);
-      if (isUpperKind(paragraph.kind)) {
-        runs = runs.map((run) => ({ ...run, text: run.text.toUpperCase() }));
-      } else if (
-        paragraph.kind === "action" ||
-        paragraph.kind === "dialogue" ||
-        paragraph.kind === "general" ||
-        paragraph.kind === "lyric" ||
-        paragraph.kind === "singing"
-      ) {
-        runs = capitalizeSentenceRuns(runs);
-      }
-      const nextLength = runs.reduce((sum, run) => sum + run.text.length, 0);
-      const added = revisionMark ? nextLength - revisionMark.length : 0;
-      if (revisionMark && added > 0) {
-        if (store.revision) runs = markRevisionRange(runs, revisionMark.offset, revisionMark.offset + added, store.revision);
-        if (typingStyle.bold) runs = toggleStyle(runs, revisionMark.offset, revisionMark.offset + added, "bold");
-        if (typingStyle.italic) runs = toggleStyle(runs, revisionMark.offset, revisionMark.offset + added, "italic");
-        if (typingStyle.underline) runs = toggleStyle(runs, revisionMark.offset, revisionMark.offset + added, "underline");
-      }
-      revisionMark = null;
-      paragraph.runs = runs;
-      const editedLength = edited.reduce((sum, run) => sum + run.text.length, 0);
-      el.dataset.sliceEnd = String(sliceStart + editedLength);
-      const shown = sliceRuns(index, sliceStart, sliceStart + editedLength);
-      const shownText = shown.map((run) => run.text).join("");
-      const domText = edited.map((run) => run.text).join("");
-      if (shownText !== domText) writeRuns(el, shown, localOffset);
-      heldCaret = { index, offset: sliceStart + localOffset };
-      const text = paragraphText(paragraph);
-      if (text === "") el.dataset.placeholder = PLACEHOLDER[paragraph.kind] ?? "";
-      else delete el.dataset.placeholder;
-      if (paragraph.kind === "character") {
-        el.style.setProperty("--cue", characterColor(characterBase(text) || "A"));
-        el.dataset.contd = displayContd(store.script, index) ? "1" : "0";
-      }
-      store.noteText();
-      showSuggest(el, paragraph);
-      tabWalk = null;
-    });
-    el.addEventListener("blur", () => {
-      const index = Number(el.dataset.index);
-      const paragraph = store.script.paragraphs[index];
-      if (!paragraph || paragraph.kind !== "parenthetical") return;
-      const normalized = normalizeParenthetical(paragraphText(paragraph));
-      if (normalized === paragraphText(paragraph)) return;
-      store.beginBurst();
-      paragraph.runs = [{ text: normalized }];
-      el.innerHTML = runsToHtml(paragraph.runs);
-      store.noteText();
-    });
-    el.addEventListener("paste", (event) => {
+      return;
+    }
+    if (el === focused) return;
+    const previous = focused;
+    focused = el;
+    styleTarget = applyInline;
+    markCaret(el);
+    if (selection.isCollapsed && previous && previous !== el) normalizeLeaving(previous);
+    if (crossing()) return;
+    store.selectParagraph(Number(el.dataset.index));
+    if (store.typewriter) el.scrollIntoView({ block: "center" });
+  };
+
+  desk.addEventListener("focusin", () => clearFindHit());
+  desk.addEventListener("focusout", () => {
+    if (focused) normalizeLeaving(focused);
+    focused = null;
+    markCaret(null);
+  });
+  desk.addEventListener("pointerdown", () => {
+    pointerHeld = true;
+  });
+  const release = (): void => {
+    if (!pointerHeld) return;
+    pointerHeld = false;
+    onSelection();
+  };
+  window.addEventListener("pointerup", release);
+  document.addEventListener("selectionchange", onSelection);
+  desk.addEventListener("dragstart", (event) => event.preventDefault());
+  desk.addEventListener("drop", (event) => event.preventDefault());
+
+  desk.addEventListener("beforeinput", (event) => {
+    if (event.inputType === "historyUndo" || event.inputType === "historyRedo") {
       event.preventDefault();
-      const text = event.clipboardData?.getData("text/plain") ?? "";
-      if (!text) return;
-      const index = Number(el.dataset.index);
-      const paragraph = store.script.paragraphs[index];
-      if (!paragraph) return;
-      if (text.includes("\n")) {
-        let inserted = paragraphsFromPlain(text);
-        if (looksLikeFountain(text)) {
-          try {
-            const parsed = readFountain(text);
-            if (parsed.paragraphs.length > 0) inserted = parsed.paragraphs;
-          } catch {
-            // The line-by-line guess still stands.
-          }
+      if (event.inputType === "historyUndo") store.undo();
+      else store.redo();
+      return;
+    }
+    if (crossing()) {
+      event.preventDefault();
+      const span = modelSpan();
+      if (!span) return;
+      if (event.inputType === "insertText" || event.inputType === "insertReplacementText") {
+        const text = (event.data ?? event.dataTransfer?.getData("text/plain") ?? "").replace(/\r?\n/gu, " ");
+        replaceSpan(span, text);
+      } else if (event.inputType.startsWith("delete")) {
+        replaceSpan(span, "");
+      }
+      return;
+    }
+    const el = paragraphOf(window.getSelection()?.anchorNode ?? null);
+    if (
+      !el ||
+      event.inputType.startsWith("format") ||
+      event.inputType === "insertFromDrop" ||
+      event.inputType === "deleteByDrag" ||
+      event.inputType === "insertParagraph"
+    ) {
+      event.preventDefault();
+      return;
+    }
+    inputTarget = el;
+    store.beginBurst();
+    const current = store.script.paragraphs[Number(el.dataset.index)];
+    const length = current ? paragraphText(current).length : 0;
+    const at = sliceStartOf(el) + caretIn(el);
+    revisionMark = store.revision ? { offset: at, length } : null;
+    if (typingStyle.bold || typingStyle.italic || typingStyle.underline) {
+      revisionMark = { offset: at, length };
+    }
+  });
+
+  desk.addEventListener("compositionstart", () => {
+    const span = crossing() ? modelSpan() : null;
+    if (span) replaceSpan(span, "");
+  });
+
+  desk.addEventListener("input", () => {
+    if (syncing) return;
+    const el = inputTarget?.isConnected ? inputTarget : caretParagraph();
+    inputTarget = null;
+    if (!el) return;
+    const index = Number(el.dataset.index);
+    const paragraph = store.script.paragraphs[index];
+    if (!paragraph) return;
+    const sliceStart = sliceStartOf(el);
+    const sliceEnd = Number(el.dataset.sliceEnd ?? paragraphText(paragraph).length);
+    const edited = runsFromElement(el);
+    const localOffset = caretIn(el);
+    const [head] = splitRuns(paragraph.runs, sliceStart);
+    const [, tail] = splitRuns(paragraph.runs, sliceEnd);
+    let runs = joinRuns(joinRuns(head, edited), tail);
+    if (isUpperKind(paragraph.kind)) {
+      runs = upperRuns(runs);
+    } else if (
+      paragraph.kind === "action" ||
+      paragraph.kind === "dialogue" ||
+      paragraph.kind === "general" ||
+      paragraph.kind === "lyric" ||
+      paragraph.kind === "singing"
+    ) {
+      runs = capitalizeSentenceRuns(runs);
+    }
+    const nextLength = runs.reduce((sum, run) => sum + run.text.length, 0);
+    const added = revisionMark ? nextLength - revisionMark.length : 0;
+    if (revisionMark && added > 0) {
+      if (store.revision) runs = markRevisionRange(runs, revisionMark.offset, revisionMark.offset + added, store.revision);
+      if (typingStyle.bold) runs = toggleStyle(runs, revisionMark.offset, revisionMark.offset + added, "bold");
+      if (typingStyle.italic) runs = toggleStyle(runs, revisionMark.offset, revisionMark.offset + added, "italic");
+      if (typingStyle.underline) runs = toggleStyle(runs, revisionMark.offset, revisionMark.offset + added, "underline");
+    }
+    revisionMark = null;
+    paragraph.runs = runs;
+    const editedLength = edited.reduce((sum, run) => sum + run.text.length, 0);
+    el.dataset.sliceEnd = String(sliceStart + editedLength);
+    const shown = sliceRuns(index, sliceStart, sliceStart + editedLength);
+    const shownText = shown.map((run) => run.text).join("");
+    const domText = edited.map((run) => run.text).join("");
+    if (shownText !== domText || (domText === "" && !el.querySelector("br"))) writeRuns(el, shown, localOffset);
+    heldCaret = { index, offset: sliceStart + localOffset };
+    const text = paragraphText(paragraph);
+    if (text === "") el.dataset.placeholder = PLACEHOLDER[paragraph.kind] ?? "";
+    else delete el.dataset.placeholder;
+    if (paragraph.kind === "character") {
+      el.style.setProperty("--cue", characterColor(characterBase(text) || "A"));
+      el.dataset.contd = displayContd(store.script, index) ? "1" : "0";
+    }
+    store.noteText();
+    showSuggest(el, paragraph);
+    tabWalk = null;
+  });
+
+  const copySpan = (event: ClipboardEvent): Span | null => {
+    if (!crossing()) return null;
+    const span = modelSpan();
+    if (!span) return null;
+    event.preventDefault();
+    event.clipboardData?.setData("text/plain", spanText(span));
+    event.clipboardData?.setData(CLIPBOARD_TYPE, JSON.stringify(spanParagraphs(span)));
+    return span;
+  };
+  desk.addEventListener("copy", (event) => {
+    copySpan(event);
+  });
+  desk.addEventListener("cut", (event) => {
+    const span = copySpan(event);
+    if (span) replaceSpan(span, "");
+  });
+
+  const pastedParagraphs = (data: DataTransfer | null): Paragraph[] | null => {
+    const raw = data?.getData(CLIPBOARD_TYPE) ?? "";
+    if (raw) {
+      try {
+        const copied = JSON.parse(raw) as { kind: ElementKind; runs: TextRun[] }[];
+        if (Array.isArray(copied) && copied.length > 0) {
+          return copied.map((item) => {
+            const paragraph = makeParagraph(item.kind, "");
+            paragraph.runs = joinRuns(item.runs, []);
+            return paragraph;
+          });
         }
-        store.transact(() => {
-          store.script.paragraphs.splice(index + 1, 0, ...inserted);
-          store.caret = { index: index + inserted.length, offset: 0 };
-        });
-        return;
+      } catch {
+        // Fall back to the plain text.
       }
-      const sliceStart = Number(el.dataset.sliceStart ?? 0);
-      const offset = sliceStart + caretOffset(el);
-      store.beginBurst();
-      const [left, right] = splitRuns(paragraph.runs, offset);
-      paragraph.runs = joinRuns(joinRuns(left, [{ text }]), right);
-      el.dataset.sliceEnd = String(Number(el.dataset.sliceEnd ?? offset) + text.length);
-      writeRuns(el, sliceRuns(index, sliceStart, Number(el.dataset.sliceEnd)), offset - sliceStart + text.length);
-      heldCaret = { index, offset: offset + text.length };
-      store.noteText();
-    });
-    el.addEventListener("keydown", (event) => {
-      const index = Number(el.dataset.index);
-      const paragraph = store.script.paragraphs[index];
+    }
+    const text = data?.getData("text/plain") ?? "";
+    if (!text.includes("\n")) return null;
+    if (looksLikeFountain(text)) {
+      try {
+        const parsed = readFountain(text);
+        if (parsed.paragraphs.length > 0) return parsed.paragraphs;
+      } catch {
+        // The line-by-line guess still stands.
+      }
+    }
+    return paragraphsFromPlain(text);
+  };
+
+  desk.addEventListener("paste", (event) => {
+    event.preventDefault();
+    const span = modelSpan();
+    if (!span) return;
+    const text = event.clipboardData?.getData("text/plain") ?? "";
+    const inserted = pastedParagraphs(event.clipboardData);
+    if (!inserted && !text) return;
+    store.transact(() => {
+      const at = removeSpan(span);
+      const paragraph = store.script.paragraphs[at.index];
       if (!paragraph) return;
-      const mod = event.ctrlKey || event.metaKey;
-      if (!suggest.classList.contains("hidden") && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
-        event.preventDefault();
-        suggestIndex = (suggestIndex + (event.key === "ArrowDown" ? 1 : items.length - 1)) % items.length;
-        paintSuggest();
+      if (!inserted) {
+        const [left, right] = splitRuns(paragraph.runs, at.offset);
+        paragraph.runs = joinRuns(joinRuns(left, [{ text: isUpperKind(paragraph.kind) ? text.toUpperCase() : text }]), right);
+        store.caret = { index: at.index, offset: at.offset + text.length };
         return;
       }
-      if (event.key === "Escape") {
-        hideSuggest();
+      const last = inserted[inserted.length - 1];
+      const lastLength = last ? paragraphText(last).length : 0;
+      if (paragraphText(paragraph) === "") {
+        store.script.paragraphs.splice(at.index, 1, ...inserted);
+        store.caret = { index: at.index + inserted.length - 1, offset: lastLength };
         return;
       }
-      if (typeArmed && /^[1-9]$/u.test(event.key)) {
+      const [left, right] = splitRuns(paragraph.runs, at.offset);
+      const keepHead = left.some((run) => run.text !== "");
+      const rest: Paragraph[] = [];
+      if (right.some((run) => run.text !== "")) {
+        const tail = makeParagraph(paragraph.kind, "");
+        tail.runs = joinRuns(right, []);
+        rest.push(tail);
+      }
+      if (keepHead) paragraph.runs = joinRuns(left, []);
+      const start = keepHead ? at.index + 1 : at.index;
+      store.script.paragraphs.splice(start, keepHead ? 0 : 1, ...inserted, ...rest);
+      store.caret = { index: start + inserted.length - 1, offset: lastLength };
+    });
+  });
+
+  const goTo = (target: HTMLElement | null | undefined): void => {
+    if (!target) return;
+    setCaret(target, 0);
+    target.scrollIntoView({ block: "nearest" });
+  };
+
+  desk.addEventListener("keydown", (event) => {
+    const mod = event.ctrlKey || event.metaKey;
+    if (!suggest.classList.contains("hidden") && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+      event.preventDefault();
+      suggestIndex = (suggestIndex + (event.key === "ArrowDown" ? 1 : items.length - 1)) % items.length;
+      paintSuggest();
+      return;
+    }
+    if (event.key === "Escape") {
+      hideSuggest();
+      return;
+    }
+    if (crossing()) {
+      const span = modelSpan();
+      if (!span) return;
+      if (event.key === "Backspace" || event.key === "Delete") {
         event.preventDefault();
-        const option = kindOptions()[Number(event.key) - 1];
-        typeArmed = false;
-        hideSuggest();
-        tabWalk = null;
-        if (!option) return;
-        const offset = Number(el.dataset.sliceStart ?? 0) + caretOffset(el);
+        replaceSpan(span, "");
+        return;
+      }
+      if (event.key === "Enter") {
+        event.preventDefault();
         store.transact(() => {
-          applyKind(paragraph, option.kind);
-          store.caret = { index, offset };
-        });
-        return;
-      }
-      if (event.altKey && /^[1-9]$/u.test(event.key)) {
-        event.preventDefault();
-        const option = kindOptions()[Number(event.key) - 1];
-        if (!option) return;
-        const offset = Number(el.dataset.sliceStart ?? 0) + caretOffset(el);
-        store.transact(() => {
-          applyKind(paragraph, option.kind);
-          store.caret = { index, offset };
+          const at = removeSpan(span);
+          splitAt(at.index, at.offset);
         });
         return;
       }
       if (event.key === "Tab") {
         event.preventDefault();
-        hideSuggest();
-        const offset = Number(el.dataset.sliceStart ?? 0) + caretOffset(el);
-        const previous = index > 0 ? (store.script.paragraphs[index - 1]?.kind ?? null) : null;
-        if (!tabWalk || tabWalk.index !== index) {
-          tabWalk = { index, from: paragraph.kind, text: paragraphText(paragraph), previous, step: 0 };
-        }
-        const list = guessKinds(tabWalk.from, tabWalk.text, tabWalk.previous);
-        if (event.shiftKey) {
-          typeArmed = true;
-          showTypeMenu(el);
-          return;
-        }
+        if (event.shiftKey && focused) showTypeMenu(focused);
+        return;
+      }
+      if ((typeArmed || event.altKey) && /^[1-9]$/u.test(event.key)) {
+        event.preventDefault();
+        const option = kindOptions()[Number(event.key) - 1];
         typeArmed = false;
-        if (list.length === 0) return;
-        tabWalk.step += 1;
-        const next = list[(tabWalk.step - 1) % list.length];
-        if (!next) return;
-        store.transact(() => {
-          applyKind(paragraph, next);
-          store.caret = { index, offset };
-        });
+        hideSuggest();
+        if (option) setKinds(span, option.kind);
+      }
+      return;
+    }
+    const el = caretParagraph();
+    if (!el) {
+      if (event.key === "Backspace" || event.key === "Delete" || event.key === "Enter" || event.key === "Tab") event.preventDefault();
+      return;
+    }
+    const index = Number(el.dataset.index);
+    const paragraph = store.script.paragraphs[index];
+    if (!paragraph) return;
+    if (typeArmed && /^[1-9]$/u.test(event.key)) {
+      event.preventDefault();
+      const option = kindOptions()[Number(event.key) - 1];
+      typeArmed = false;
+      hideSuggest();
+      tabWalk = null;
+      if (!option) return;
+      const offset = sliceStartOf(el) + caretIn(el);
+      store.transact(() => {
+        applyKind(paragraph, option.kind);
+        store.caret = { index, offset };
+      });
+      return;
+    }
+    if (event.altKey && /^[1-9]$/u.test(event.key)) {
+      event.preventDefault();
+      const option = kindOptions()[Number(event.key) - 1];
+      if (!option) return;
+      const offset = sliceStartOf(el) + caretIn(el);
+      store.transact(() => {
+        applyKind(paragraph, option.kind);
+        store.caret = { index, offset };
+      });
+      return;
+    }
+    if (event.key === "Tab") {
+      event.preventDefault();
+      hideSuggest();
+      const offset = sliceStartOf(el) + caretIn(el);
+      const previous = index > 0 ? (store.script.paragraphs[index - 1]?.kind ?? null) : null;
+      if (!tabWalk || tabWalk.index !== index) {
+        tabWalk = { index, from: paragraph.kind, text: paragraphText(paragraph), previous, step: 0 };
+      }
+      const list = guessKinds(tabWalk.from, tabWalk.text, tabWalk.previous);
+      if (event.shiftKey) {
+        typeArmed = true;
+        showTypeMenu(el);
         return;
       }
-      if (event.key === "Enter" && !event.shiftKey) {
-        event.preventDefault();
-        if (!suggest.classList.contains("hidden")) {
-          const chosen = items[suggestIndex];
-          if (chosen) accept(el, chosen);
-          return;
+      typeArmed = false;
+      if (list.length === 0) return;
+      tabWalk.step += 1;
+      const next = list[(tabWalk.step - 1) % list.length];
+      if (!next) return;
+      store.transact(() => {
+        applyKind(paragraph, next);
+        store.caret = { index, offset };
+      });
+      return;
+    }
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      if (!suggest.classList.contains("hidden")) {
+        const chosen = items[suggestIndex];
+        if (chosen) accept(el, chosen);
+        return;
+      }
+      const span = modelSpan();
+      store.transact(() => {
+        const at = span ? removeSpan(span) : { index, offset: sliceStartOf(el) + caretIn(el) };
+        splitAt(at.index, at.offset);
+      });
+      return;
+    }
+    if (mod && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
+      event.preventDefault();
+      const spans = sceneSpans(store.script);
+      const at = spans.findIndex((span) => index >= span.start && index < span.end);
+      const dest = spans[at + (event.key === "ArrowDown" ? 1 : -1)];
+      goTo(dest ? desk.querySelector<HTMLElement>(`.paragraph[data-index="${dest.start}"]`) : null);
+      return;
+    }
+    if (event.key === "PageUp" || event.key === "PageDown") {
+      event.preventDefault();
+      const pages = paragraphPages(store.script);
+      const current = pages[index] ?? 1;
+      const wanted = event.key === "PageDown" ? current + 1 : current - 1;
+      const next = pages.findIndex((page) => page === wanted);
+      goTo(next >= 0 ? desk.querySelector<HTMLElement>(`.paragraph[data-index="${next}"]`) : null);
+      return;
+    }
+    const collapsed = window.getSelection()?.isCollapsed ?? true;
+    if (event.key === "Backspace" && collapsed && caretIn(el) === 0) {
+      event.preventDefault();
+      const sliceStart = sliceStartOf(el);
+      if (sliceStart > 0) {
+        store.beginBurst();
+        const [left, right] = splitRuns(paragraph.runs, sliceStart - 1);
+        const [, tail] = splitRuns(right, 1);
+        paragraph.runs = joinRuns(left, tail);
+        heldCaret = { index, offset: sliceStart - 1 };
+        store.caret = heldCaret;
+        pageSignature = "";
+        store.noteText();
+        return;
+      }
+      if (index === 0) return;
+      const previous = store.script.paragraphs[index - 1];
+      if (!previous) return;
+      const previousLength = paragraphText(previous).length;
+      store.transact(() => {
+        if (paragraphText(paragraph) !== "") {
+          previous.runs = joinRuns(previous.runs, paragraph.runs);
+          if (isUpperKind(previous.kind)) previous.runs = upperRuns(previous.runs);
         }
-        const offset = Number(el.dataset.sliceStart ?? 0) + caretOffset(el);
-        const [left, right] = splitRuns(paragraph.runs, offset);
-        const before = left.map((run) => run.text).join("");
-        const atEnd = offset >= paragraphText(paragraph).length;
-        const decision = enterResult(paragraph.kind, before, atEnd);
-        store.transact(() => {
-          if (decision.become && decision.next === null) {
-            paragraph.runs = left;
-            applyKind(paragraph, decision.become);
-            store.caret = { index, offset: paragraphText(paragraph).length };
-            return;
-          }
-          paragraph.runs = left;
-          const nextKind = decision.next ?? "action";
-          const next = makeParagraph(nextKind, "");
-          next.runs = isUpperKind(nextKind) ? right.map((run) => ({ ...run, text: run.text.toUpperCase() })) : right.map((run) => ({ ...run }));
-          if (
-            paragraph.dualGroup !== undefined &&
-            (next.kind === "dialogue" || next.kind === "parenthetical" || next.kind === "character")
-          ) {
-            next.dualGroup = paragraph.dualGroup;
-          }
-          store.script.paragraphs.splice(index + 1, 0, next);
-          store.caret = { index: index + 1, offset: 0 };
-        });
+        if (store.script.paragraphs.length > 1) store.script.paragraphs.splice(index, 1);
+        store.caret = { index: index - 1, offset: previousLength };
+      });
+      return;
+    }
+    if (event.key === "Delete" && collapsed) {
+      const shown = runsFromElement(el).reduce((sum, run) => sum + run.text.length, 0);
+      if (caretIn(el) < shown) return;
+      // At the end of a paragraph the browser would pull the next one into this element.
+      event.preventDefault();
+      const end = sliceStartOf(el) + shown;
+      const length = paragraphText(paragraph).length;
+      if (end < length) {
+        store.beginBurst();
+        const [left, right] = splitRuns(paragraph.runs, end);
+        const [, tail] = splitRuns(right, 1);
+        paragraph.runs = joinRuns(left, tail);
+        heldCaret = { index, offset: end };
+        store.caret = heldCaret;
+        pageSignature = "";
+        store.noteText();
         return;
       }
-      if (mod && event.key.toLowerCase() === "a") {
-        event.preventDefault();
-        block = { start: 0, end: store.script.paragraphs.length };
-        markBlock();
-        return;
-      }
-      if (block && mod && (event.key.toLowerCase() === "c" || event.key.toLowerCase() === "x")) {
-        event.preventDefault();
-        const text = store.script.paragraphs
-          .slice(block.start, block.end)
-          .map((item) => paragraphText(item))
-          .join("\n");
-        void navigator.clipboard.writeText(text);
-        if (event.key.toLowerCase() === "x") {
-          const start = block.start;
-          store.transact(() => {
-            store.script.paragraphs.splice(start, block ? block.end - start : 0);
-            if (store.script.paragraphs.length === 0) store.script.paragraphs.push(makeParagraph("action", ""));
-            store.caret = { index: Math.min(start, store.script.paragraphs.length - 1), offset: 0 };
-          });
-          block = null;
+      const next = store.script.paragraphs[index + 1];
+      if (!next) return;
+      store.transact(() => {
+        if (paragraphText(next) !== "") {
+          paragraph.runs = joinRuns(paragraph.runs, isUpperKind(paragraph.kind) ? upperRuns(next.runs) : next.runs);
         }
-        return;
-      }
-      if (block && (event.key === "Backspace" || event.key === "Delete")) {
-        event.preventDefault();
-        const start = block.start;
-        store.transact(() => {
-          store.script.paragraphs.splice(start, block ? block.end - start : 0);
-          if (store.script.paragraphs.length === 0) store.script.paragraphs.push(makeParagraph("action", ""));
-          store.caret = { index: Math.min(start, store.script.paragraphs.length - 1), offset: 0 };
-        });
-        block = null;
-        return;
-      }
-      if (event.shiftKey && !mod && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
-        event.preventDefault();
-        const origin = blockAnchor ?? index;
-        const next = index + (event.key === "ArrowDown" ? 1 : -1);
-        if (next < 0 || next >= store.script.paragraphs.length) return;
-        blockAnchor = origin;
-        block = { start: Math.min(origin, next), end: Math.max(origin, next) + 1 };
-        markBlock();
-        desk.querySelector<HTMLElement>(`.paragraph[data-index="${next}"]`)?.focus();
-        return;
-      }
-      if (mod && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
-        event.preventDefault();
-        const spans = sceneSpans(store.script);
-        const at = spans.findIndex((span) => index >= span.start && index < span.end);
-        const dest = spans[at + (event.key === "ArrowDown" ? 1 : -1)];
-        const target = dest ? desk.querySelector<HTMLElement>(`.paragraph[data-index="${dest.start}"]`) : null;
-        target?.focus();
-        return;
-      }
-      if (event.key === "PageUp" || event.key === "PageDown") {
-        event.preventDefault();
-        const pages = paragraphPages(store.script);
-        const current = pages[index] ?? 1;
-        const wanted = event.key === "PageDown" ? current + 1 : current - 1;
-        const next = pages.findIndex((page) => page === wanted);
-        const target = next >= 0 ? desk.querySelector<HTMLElement>(`.paragraph[data-index="${next}"]`) : null;
-        target?.focus();
-        return;
-      }
-      const collapsed = window.getSelection()?.isCollapsed ?? true;
-      if (event.key === "Backspace" && collapsed && caretOffset(el) === 0) {
-        event.preventDefault();
-        const sliceStart = Number(el.dataset.sliceStart ?? 0);
-        if (sliceStart > 0) {
-          store.beginBurst();
-          const [left, right] = splitRuns(paragraph.runs, sliceStart - 1);
-          const [, tail] = splitRuns(right, 1);
-          paragraph.runs = joinRuns(left, tail);
-          heldCaret = { index, offset: sliceStart - 1 };
-          store.caret = heldCaret;
-          pageSignature = "";
-          store.noteText();
-          return;
-        }
-        if (index === 0) return;
-        const previous = store.script.paragraphs[index - 1];
-        if (!previous) return;
-        const previousLength = paragraphText(previous).length;
-        store.transact(() => {
-          if (paragraphText(paragraph) !== "") {
-            previous.runs = joinRuns(previous.runs, paragraph.runs);
-            if (isUpperKind(previous.kind)) {
-              previous.runs = previous.runs.map((run) => ({ ...run, text: run.text.toUpperCase() }));
-            }
-          }
-          if (store.script.paragraphs.length > 1) store.script.paragraphs.splice(index, 1);
-          store.caret = { index: index - 1, offset: previousLength };
-        });
-        return;
-      }
-      if (event.key === "ArrowUp" && collapsed && caretOffset(el) === 0 && suggest.classList.contains("hidden")) {
-        const all = [...desk.querySelectorAll<HTMLElement>(".paragraph")];
-        const previous = all[all.indexOf(el) - 1];
-        if (!previous) return;
-        event.preventDefault();
-        setCaret(previous, runsFromElement(previous).reduce((sum, run) => sum + run.text.length, 0));
-        return;
-      }
-      if (event.key === "ArrowDown" && collapsed && suggest.classList.contains("hidden")) {
-        const shown = runsFromElement(el).reduce((sum, run) => sum + run.text.length, 0);
-        if (caretOffset(el) < shown) return;
-        const all = [...desk.querySelectorAll<HTMLElement>(".paragraph")];
-        const next = all[all.indexOf(el) + 1];
-        if (!next) return;
-        event.preventDefault();
-        setCaret(next, 0);
-      }
-    });
-  };
+        store.script.paragraphs.splice(index + 1, 1);
+        store.caret = { index, offset: length };
+      });
+    }
+  });
 
   let omitted = new Set<number>();
   let pageSignature = "";
@@ -534,6 +855,11 @@ export function mountEditor(host: HTMLElement, store: Store): () => void {
     return head;
   };
 
+  const fixed = <T extends HTMLElement>(node: T): T => {
+    node.contentEditable = "false";
+    return node;
+  };
+
   const rowFor = (piece: PagePiece): HTMLElement => {
     const index = piece.index;
     const paragraph = store.script.paragraphs[index];
@@ -542,7 +868,7 @@ export function mountEditor(host: HTMLElement, store: Store): () => void {
     if (omitted.has(index)) row.classList.add("omitted");
     if (!paragraph) return row;
     if (store.selection?.type === "paragraph" && store.selection.index === index) row.classList.add("active");
-    const gutter = document.createElement("span");
+    const gutter = fixed(document.createElement("span"));
     gutter.className = "gutter";
     if (paragraph.kind === "scene-heading" && paragraph.sceneNumber) gutter.textContent = paragraph.sceneNumber;
     if (paragraph.runs.some((run) => run.revisionId)) gutter.dataset.revised = "1";
@@ -554,32 +880,28 @@ export function mountEditor(host: HTMLElement, store: Store): () => void {
     }
     const editable = document.createElement("div");
     editable.className = `paragraph kind-${paragraph.kind}`;
-    editable.contentEditable = "true";
     editable.spellcheck = paragraph.kind !== "character";
     editable.dataset.index = String(index);
     editable.dataset.sliceStart = String(piece.start);
     editable.dataset.sliceEnd = String(piece.end);
     editable.dataset.testid = "paragraph";
     editable.dataset.kind = paragraph.kind;
-    editable.setAttribute("role", "textbox");
-    editable.setAttribute("aria-label", paragraph.kind);
-    editable.innerHTML = runsToHtml(sliceRuns(index, piece.start, piece.end));
+    editable.innerHTML = htmlFor(sliceRuns(index, piece.start, piece.end));
     if (paragraphText(paragraph) === "") editable.dataset.placeholder = PLACEHOLDER[paragraph.kind] ?? "";
     if (paragraph.kind === "character") {
       editable.style.setProperty("--cue", characterColor(characterBase(paragraphText(paragraph)) || "A"));
       if (displayContd(store.script, index)) editable.dataset.contd = "1";
     }
-    wire(editable);
     row.append(gutter, editable);
     if (paragraph.notes.length > 0) {
-      const flag = document.createElement("button");
+      const flag = fixed(document.createElement("button"));
       flag.type = "button";
       flag.className = "note-flag";
       flag.textContent = "Note";
       const shown = (paragraph.notes[0] ?? "Script note").replace(/^\d+-\d+\|/u, "");
       flag.title = shown;
       flag.addEventListener("click", () => store.selectParagraph(index));
-      const margin = document.createElement("aside");
+      const margin = fixed(document.createElement("aside"));
       margin.className = "margin-note";
       margin.textContent = shown;
       row.append(flag, margin);
@@ -626,9 +948,34 @@ export function mountEditor(host: HTMLElement, store: Store): () => void {
     }
   };
 
+  const typingElsewhere = (): boolean => {
+    const active = document.activeElement;
+    return (
+      (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement || active instanceof HTMLSelectElement) &&
+      !desk.contains(active)
+    );
+  };
+
+  const clearFindHit = (): void => {
+    if (typeof CSS !== "undefined" && "highlights" in CSS) CSS.highlights.delete("folio-find");
+  };
+
+  const showFindHit = (index: number, start: number, end: number): void => {
+    const el = elementAt({ index, offset: start });
+    if (!el) return;
+    el.scrollIntoView({ block: "center" });
+    if (typeof CSS === "undefined" || !("highlights" in CSS) || typeof Highlight === "undefined") return;
+    const from = pointAt(el, start - sliceStartOf(el));
+    const to = pointAt(el, Math.min(end, Number(el.dataset.sliceEnd ?? end)) - sliceStartOf(el));
+    const range = document.createRange();
+    range.setStart(from.node, from.offset);
+    range.setEnd(to.node, to.offset);
+    CSS.highlights.set("folio-find", new Highlight(range));
+  };
+
   const otherEditorFocused = (): boolean => {
     const active = document.activeElement;
-    return active instanceof HTMLElement && active.classList.contains("paragraph") && !desk.contains(active);
+    return active instanceof HTMLElement && active.dataset.testid === "script-desk" && active !== desk;
   };
 
   const shouldPlaceCaret = (): boolean => {
@@ -657,6 +1004,8 @@ export function mountEditor(host: HTMLElement, store: Store): () => void {
       for (let index = span.start; index < span.end; index += 1) omitted.add(index);
     }
     const caret = store.takeCaret();
+    painting = true;
+    focused = null;
     desk.classList.toggle("show-numbers", store.sceneNumbers);
     desk.classList.toggle("show-watermark", store.watermark);
     desk.replaceChildren();
@@ -671,7 +1020,7 @@ export function mountEditor(host: HTMLElement, store: Store): () => void {
       sheet.dataset.testid = "sheet";
       sheet.dataset.page = String(pageIndex + 1);
       if (store.watermark) sheet.dataset.watermark = (title || "FOLIO").toUpperCase();
-      const head = document.createElement("div");
+      const head = fixed(document.createElement("div"));
       head.className = "sheet-head";
       head.append(document.createElement("span"));
       const slug = head.firstElementChild;
@@ -685,14 +1034,14 @@ export function mountEditor(host: HTMLElement, store: Store): () => void {
       body.className = "sheet-body";
       const mark = marks[pageIndex];
       if (mark?.continuedName) {
-        const banner = document.createElement("div");
+        const banner = fixed(document.createElement("div"));
         banner.className = "contd-banner";
         banner.textContent = `${mark.continuedName} (CONT'D)`;
         body.append(banner);
       }
       renderBlock(body, pieces);
       if (mark?.more) {
-        const more = document.createElement("div");
+        const more = fixed(document.createElement("div"));
         more.className = "more-line";
         more.textContent = "(MORE)";
         body.append(more);
@@ -700,6 +1049,7 @@ export function mountEditor(host: HTMLElement, store: Store): () => void {
       sheet.append(head, body);
       desk.append(sheet);
     });
+    painting = false;
     if (!placeCaret) {
       if (caret) store.caret = caret;
       return;
@@ -709,18 +1059,20 @@ export function mountEditor(host: HTMLElement, store: Store): () => void {
     const matches = [...desk.querySelectorAll<HTMLElement>(`.paragraph[data-index="${target.index}"]`)];
     const el =
       matches.find((node) => {
-        const start = Number(node.dataset.sliceStart ?? 0);
+        const start = sliceStartOf(node);
         const end = Number(node.dataset.sliceEnd ?? 0);
         return target.offset >= start && target.offset < end;
       }) ??
       matches.find((node) => Number(node.dataset.sliceEnd ?? 0) >= target.offset) ??
       matches[matches.length - 1];
     if (!el) return;
-    if (caret) setCaret(el, target.offset - Number(el.dataset.sliceStart ?? 0));
+    if (caret) setCaret(el, target.offset - sliceStartOf(el));
     else el.scrollIntoView({ block: "nearest" });
     const range = store.selection?.type === "paragraph" ? store.selection : null;
     if (range?.start !== undefined && range.end !== undefined) setRange(el, range.start, range.end);
   };
+
+  let pageTimer = 0;
 
   const onStore = (event: string): void => {
     if (event === "script" || event === "view") paint();
@@ -732,18 +1084,14 @@ export function mountEditor(host: HTMLElement, store: Store): () => void {
         if (signature === pageSignature) return;
         if (heldCaret) store.caret = heldCaret;
         else {
-          const active = document.activeElement;
-          if (active instanceof HTMLElement && desk.contains(active) && active.dataset.index) {
-            store.caret = {
-              index: Number(active.dataset.index),
-              offset: Number(active.dataset.sliceStart ?? 0) + caretOffset(active),
-            };
+          const active = caretParagraph();
+          if (active && document.activeElement === desk) {
+            store.caret = { index: Number(active.dataset.index), offset: sliceStartOf(active) + caretIn(active) };
           }
         }
         paint();
       }, 280);
-    }
-    else if (event === "chrome") {
+    } else if (event === "chrome") {
       fitWidth();
       desk.classList.toggle("show-numbers", store.sceneNumbers);
       desk.classList.toggle("show-watermark", store.watermark);
@@ -753,12 +1101,16 @@ export function mountEditor(host: HTMLElement, store: Store): () => void {
       const el = desk.querySelector<HTMLElement>(`.paragraph[data-index="${store.selection.index}"]`);
       el?.closest(".row")?.classList.add("active");
       if (!el) return;
-      if (!shouldPlaceCaret()) {
-        el.scrollIntoView({ block: "nearest" });
+      const { start, end } = store.selection;
+      if (!shouldPlaceCaret() || typingElsewhere()) {
+        // Someone is typing in the find box or a field. Show the match without taking focus.
+        if (start !== undefined && end !== undefined) showFindHit(store.selection.index, start, end);
+        else el.scrollIntoView({ block: "nearest" });
         return;
       }
-      if (store.selection.start === undefined || store.selection.end === undefined) return;
-      setRange(el, store.selection.start, store.selection.end);
+      clearFindHit();
+      if (start === undefined || end === undefined) return;
+      setRange(el, start, end);
       el.scrollIntoView({ block: "center" });
     }
   };
@@ -780,8 +1132,12 @@ export function mountEditor(host: HTMLElement, store: Store): () => void {
 
   return () => {
     if (styleTarget === applyInline) styleTarget = null;
+    clearFindHit();
     resize.disconnect();
     unsubscribe();
+    document.removeEventListener("selectionchange", onSelection);
+    window.removeEventListener("pointerup", release);
+    window.clearTimeout(pageTimer);
     suggest.remove();
     desk.remove();
   };

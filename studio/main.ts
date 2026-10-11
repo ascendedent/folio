@@ -977,8 +977,20 @@ async function boot(): Promise<void> {
     if (event.key === "Enter") {
       event.preventDefault();
       stepFind(event.shiftKey ? -1 : 1);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      closeFind();
     }
   });
+
+  // Closing the bar puts the caret on the current match, so typing carries on in the script.
+  const closeFind = (): void => {
+    findbar.hidden = true;
+    app.classList.remove("find-open");
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && findbar.contains(active)) active.blur();
+    if (store.selection?.type === "paragraph" && store.selection.start !== undefined) store.emit("find");
+  };
 
   const openFind = (): void => {
     findbar.hidden = false;
@@ -1014,10 +1026,7 @@ async function boot(): Promise<void> {
       refreshFind();
     }),
     findCount,
-    toolButton("Close", () => {
-      findbar.hidden = true;
-      app.classList.remove("find-open");
-    }),
+    toolButton("Close", closeFind),
   );
 
   const openModal = (title: string, lines: string[]): void => {
@@ -1641,7 +1650,7 @@ async function boot(): Promise<void> {
     const mod = event.ctrlKey || event.metaKey;
     if (mod && !event.altKey && !event.shiftKey && (key === "b" || key === "i" || key === "u")) {
       const active = document.activeElement;
-      if (active instanceof HTMLElement && active.classList.contains("paragraph")) {
+      if (active instanceof HTMLElement && active.dataset.testid === "script-desk") {
         event.preventDefault();
         editorStyle(key === "b" ? "bold" : key === "i" ? "italic" : "underline");
         return;

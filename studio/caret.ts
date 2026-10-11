@@ -140,7 +140,14 @@ export function pointAt(root: Node, target: number): { node: Node; offset: numbe
   return visit(root) ?? { node: root, offset: root.childNodes.length };
 }
 
+function focusHost(root: HTMLElement): void {
+  // A paragraph inside the script desk is not focusable itself; its editing host is.
+  const host = root.isContentEditable ? (root.closest<HTMLElement>("[contenteditable='true']") ?? root) : root;
+  if (document.activeElement !== host) host.focus({ preventScroll: true });
+}
+
 export function setCaret(root: HTMLElement, offset: number): void {
+  focusHost(root);
   const point = pointAt(root, offset);
   const range = document.createRange();
   range.setStart(point.node, point.offset);
@@ -148,10 +155,10 @@ export function setCaret(root: HTMLElement, offset: number): void {
   const selection = window.getSelection();
   selection?.removeAllRanges();
   selection?.addRange(range);
-  root.focus();
 }
 
 export function setRange(root: HTMLElement, start: number, end: number): void {
+  focusHost(root);
   const from = pointAt(root, start);
   const to = pointAt(root, end);
   const range = document.createRange();
@@ -160,7 +167,6 @@ export function setRange(root: HTMLElement, start: number, end: number): void {
   const selection = window.getSelection();
   selection?.removeAllRanges();
   selection?.addRange(range);
-  root.focus();
 }
 
 export function download(filename: string, contents: string, mime: string): void {

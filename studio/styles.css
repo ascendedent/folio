@@ -522,12 +522,20 @@ select.kind option {
   border-radius: 2px;
 }
 
-.paragraph:focus { background: rgba(198, 163, 107, 0.16); }
+.desk[contenteditable] { outline: none; caret-color: var(--ink); }
+::highlight(folio-find) { background-color: rgba(230, 179, 37, 0.45); }
+.desk:focus .paragraph.is-caret { background: rgba(198, 163, 107, 0.16); }
 
+.paragraph { position: relative; }
 .paragraph[data-placeholder] { min-width: 12ch; }
-.paragraph[data-placeholder]:empty::before {
+.paragraph[data-placeholder]::before {
   content: attr(data-placeholder);
+  position: absolute;
+  left: 0;
+  top: 0;
   color: #b7afA1;
+  pointer-events: none;
+  white-space: nowrap;
 }
 
 .kind-scene-heading, .kind-action, .kind-shot, .kind-general, .kind-unknown, .kind-outline-body { max-width: 60ch; }
