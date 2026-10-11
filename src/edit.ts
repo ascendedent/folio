@@ -215,6 +215,12 @@ export function blankScript(): Script {
 }
 
 export function applyKind(paragraph: Paragraph, kind: ElementKind): void {
+  const was = paragraph.kind;
+  if (kind === "parenthetical" && was !== "parenthetical") {
+    paragraph.runs = wrapParentheticalRuns(paragraph.runs).runs;
+  } else if (was === "parenthetical" && kind !== "parenthetical") {
+    paragraph.runs = unwrapParentheticalRuns(paragraph.runs);
+  }
   paragraph.kind = kind;
   paragraph.fdxType = KIND_FDX[kind];
   if (UPPER_KINDS.has(kind)) {
@@ -366,6 +372,32 @@ export function characterBase(name: string): string {
     .replace(/\s*\^$/u, "")
     .trim()
     .toUpperCase();
+}
+
+/**
+ * Keeps a parenthetical inside one pair of parentheses while it is typed.
+ * shift is how far the caret moves because an opening parenthesis was added.
+ * Deleting down to "()" empties the line, so Backspace can remove it next.
+ */
+export function wrapParentheticalRuns(runs: readonly TextRun[]): { runs: TextRun[]; shift: number } {
+  const text = runs.map((run) => run.text).join("");
+  if (text === "") return { runs: [{ text: "" }], shift: 0 };
+  const inner = text.replace(/^\(+/u, "").replace(/\)+$/u, "");
+  if (inner.trim() === "") {
+    return text === "(" ? { runs: [{ text: "()" }], shift: 0 } : { runs: [{ text: "" }], shift: 0 };
+  }
+  const open = text.startsWith("(") ? [] : [{ text: "(" }];
+  const close = text.endsWith(")") ? [] : [{ text: ")" }];
+  return { runs: joinRuns(joinRuns(open, runs), close), shift: open.length };
+}
+
+export function unwrapParentheticalRuns(runs: readonly TextRun[]): TextRun[] {
+  const text = runs.map((run) => run.text).join("");
+  const lead = /^\(/u.test(text) ? 1 : 0;
+  const trail = /\)$/u.test(text) ? 1 : 0;
+  const [, rest] = splitRuns(runs, lead);
+  const [inner] = splitRuns(rest, text.length - lead - trail);
+  return joinRuns(inner, []);
 }
 
 export function normalizeParenthetical(text: string): string {

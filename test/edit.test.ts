@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  applyKind,
   blankScript,
   characterBase,
   completions,
@@ -23,6 +24,7 @@ import {
   linkBeatsToScenes,
   storyToBoard,
   toggleStyle,
+  wrapParentheticalRuns,
 } from "../src/edit.js";
 import { ensureBoard } from "../src/fdx/board.js";
 import { paragraphText, type Script } from "../src/model.js";
@@ -254,5 +256,39 @@ describe("screenplay editing", () => {
     assert.equal(board.cards[0]?.sceneId, "sc-ext");
     assert.equal(board.cards[1]?.sceneId, "sc-ext");
     assert.equal(board.cards[2]?.sceneId, "sc-int");
+  });
+});
+
+describe("parentheticals", () => {
+  const text = (runs: { text: string }[]): string => runs.map((run) => run.text).join("");
+
+  it("wraps typed text in one pair of parentheses", () => {
+    assert.deepEqual(wrapParentheticalRuns([{ text: "w" }]), { runs: [{ text: "(w)" }], shift: 1 });
+    assert.equal(text(wrapParentheticalRuns([{ text: "(whisp" }]).runs), "(whisp)");
+    assert.equal(wrapParentheticalRuns([{ text: "(whisp" }]).shift, 0);
+    assert.equal(text(wrapParentheticalRuns([{ text: "quietly)" }]).runs), "(quietly)");
+    assert.equal(text(wrapParentheticalRuns([{ text: "(" }]).runs), "()");
+  });
+
+  it("empties the line when only the parentheses are left", () => {
+    assert.equal(text(wrapParentheticalRuns([{ text: "()" }]).runs), "");
+    assert.equal(text(wrapParentheticalRuns([{ text: ")" }]).runs), "");
+    assert.equal(text(wrapParentheticalRuns([{ text: "" }]).runs), "");
+  });
+
+  it("keeps styled runs inside the parentheses", () => {
+    const { runs } = wrapParentheticalRuns([{ text: "beat", italic: true }]);
+    assert.deepEqual(runs, [{ text: "(" }, { text: "beat", italic: true }, { text: ")" }]);
+  });
+
+  it("adds parentheses when a line becomes a parenthetical and drops them when it stops being one", () => {
+    const paragraph = makeParagraph("dialogue", "whispering");
+    applyKind(paragraph, "parenthetical");
+    assert.equal(paragraphText(paragraph), "(whispering)");
+    applyKind(paragraph, "dialogue");
+    assert.equal(paragraphText(paragraph), "whispering");
+    const empty = makeParagraph("action", "");
+    applyKind(empty, "parenthetical");
+    assert.equal(paragraphText(empty), "");
   });
 });

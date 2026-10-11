@@ -23,6 +23,7 @@ import {
   paragraphsFromPlain,
   splitRuns,
   toggleStyle,
+  wrapParentheticalRuns,
 } from "../src/edit.js";
 import { paragraphText, scriptTitle, type ElementKind, type Paragraph, type TextRun } from "../src/model.js";
 import { pagePieces, paragraphPages, type PagePiece } from "../src/text/layout.js";
@@ -363,9 +364,12 @@ export function mountEditor(host: HTMLElement, store: Store): () => void {
   const splitAt = (index: number, offset: number): void => {
     const paragraph = store.script.paragraphs[index];
     if (!paragraph) return;
+    const length = paragraphText(paragraph).length;
+    // Just inside a parenthetical's closing ")" counts as the end of the line.
+    if (paragraph.kind === "parenthetical" && offset === length - 1 && paragraphText(paragraph).endsWith(")")) offset = length;
     const [left, right] = splitRuns(paragraph.runs, offset);
     const before = left.map((run) => run.text).join("");
-    const atEnd = offset >= paragraphText(paragraph).length;
+    const atEnd = offset >= length;
     const decision = enterResult(paragraph.kind, before, atEnd);
     if (decision.become && decision.next === null) {
       paragraph.runs = joinRuns(left, []);
@@ -542,14 +546,23 @@ export function mountEditor(host: HTMLElement, store: Store): () => void {
       if (typingStyle.underline) runs = toggleStyle(runs, revisionMark.offset, revisionMark.offset + added, "underline");
     }
     revisionMark = null;
-    paragraph.runs = runs;
     const editedLength = edited.reduce((sum, run) => sum + run.text.length, 0);
-    el.dataset.sliceEnd = String(sliceStart + editedLength);
-    const shown = sliceRuns(index, sliceStart, sliceStart + editedLength);
+    let shownEnd = sliceStart + editedLength;
+    let caret = localOffset;
+    if (paragraph.kind === "parenthetical" && sliceStart === 0 && sliceEnd >= paragraphText(paragraph).length) {
+      // Everything typed in a parenthetical stays inside its parentheses.
+      const wrapped = wrapParentheticalRuns(runs);
+      runs = wrapped.runs;
+      shownEnd = runs.reduce((sum, run) => sum + run.text.length, 0);
+      caret = shownEnd === 0 ? 0 : Math.min(localOffset + wrapped.shift, shownEnd - 1);
+    }
+    paragraph.runs = runs;
+    el.dataset.sliceEnd = String(shownEnd);
+    const shown = sliceRuns(index, sliceStart, shownEnd);
     const shownText = shown.map((run) => run.text).join("");
     const domText = edited.map((run) => run.text).join("");
-    if (shownText !== domText || (domText === "" && !el.querySelector("br"))) writeRuns(el, shown, localOffset);
-    heldCaret = { index, offset: sliceStart + localOffset };
+    if (shownText !== domText || (domText === "" && !el.querySelector("br"))) writeRuns(el, shown, caret);
+    heldCaret = { index, offset: sliceStart + caret };
     const text = paragraphText(paragraph);
     if (text === "") el.dataset.placeholder = PLACEHOLDER[paragraph.kind] ?? "";
     else delete el.dataset.placeholder;
@@ -785,6 +798,13 @@ export function mountEditor(host: HTMLElement, store: Store): () => void {
       return;
     }
     const collapsed = window.getSelection()?.isCollapsed ?? true;
+    if (paragraph.kind === "parenthetical" && collapsed && event.key.length === 1 && !mod && !event.altKey) {
+      // Typing just outside the parentheses goes inside them.
+      const shown = runsFromElement(el).map((run) => run.text).join("");
+      const local = caretIn(el);
+      if (shown.endsWith(")") && local === shown.length) setCaret(el, shown.length - 1);
+      else if (shown.startsWith("(") && local === 0) setCaret(el, 1);
+    }
     if (event.key === "Backspace" && collapsed && caretIn(el) === 0) {
       event.preventDefault();
       const sliceStart = sliceStartOf(el);
