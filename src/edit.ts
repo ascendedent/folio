@@ -229,6 +229,137 @@ export function isUpperKind(kind: ElementKind): boolean {
   return UPPER_KINDS.has(kind);
 }
 
+/** Raise a lowercase letter at the start of a line or after . ? ! */
+export function capitalizeSentenceRuns(runs: readonly TextRun[]): TextRun[] {
+  const text = runs.map((run) => run.text).join("");
+  const marks = new Set<number>();
+  const matcher = /(^|[.?!]["']?\s+|\n+)([a-z])/gu;
+  let found: RegExpExecArray | null;
+  while ((found = matcher.exec(text))) {
+    const lead = found[1] ?? "";
+    marks.add(found.index + lead.length);
+  }
+  if (marks.size === 0) return runs.map((run) => ({ ...run }));
+  let index = 0;
+  return runs.map((run) => {
+    let next = "";
+    let changed = false;
+    for (const character of run.text) {
+      if (marks.has(index)) {
+        next += character.toUpperCase();
+        changed = true;
+      } else next += character;
+      index += 1;
+    }
+    return changed ? { ...run, text: next } : { ...run };
+  });
+}
+
+const VOICE_EXTENSIONS: Record<string, string> = {
+  VO: "V.O.",
+  OS: "O.S.",
+  OC: "O.C.",
+  CONTD: "CONT'D",
+  CONTINUED: "CONT'D",
+};
+
+function formatCharacterCue(text: string): string {
+  let name = text.trim().replace(/\s+/gu, " ");
+  const extension = name.match(/\(([^)]*)\)\s*$/u);
+  let suffix = "";
+  if (extension) {
+    name = name.slice(0, extension.index).trim();
+    const token = (extension[1] ?? "").replace(/[^a-z]/giu, "").toUpperCase();
+    suffix = ` (${VOICE_EXTENSIONS[token] ?? (extension[1] ?? "").trim().toUpperCase()})`;
+  }
+  return `${name.toUpperCase()}${suffix}`.trim();
+}
+
+function formatSlug(text: string): string {
+  let value = text.trim().replace(/\s+/gu, " ").toUpperCase();
+  value = value.replace(/^INT\s*\/\s*EXT\b\.?/u, "INT./EXT.");
+  value = value.replace(/^EXT\s*\/\s*INT\b\.?/u, "EXT./INT.");
+  value = value.replace(/^I\s*\/\s*E\b\.?/u, "I/E.");
+  value = value.replace(/^(INT|EXT|EST)\b\.?/u, "$1.");
+  const time = TIMES_OF_DAY.find((item) => new RegExp(`(?:^|\\s|-)${item}$`, "u").test(value));
+  if (time && !value.includes(" - ")) {
+    const body = value.slice(0, value.length - time.length).replace(/[\s.\-–—]+$/u, "");
+    value = `${body} - ${time}`;
+  }
+  return value;
+}
+
+function formatTransition(text: string): string {
+  let value = text.trim().replace(/\s+/gu, " ").toUpperCase();
+  const known = TRANSITIONS.find((item) => item.replace(/[.:]/gu, "") === value.replace(/[.:]/gu, ""));
+  if (known) return known;
+  if (value && !/[.:]$/u.test(value)) value += ":";
+  return value;
+}
+
+function proseRuns(runs: readonly TextRun[]): TextRun[] {
+  const collapsed = runs.map((run) => ({ ...run, text: run.text.replace(/[ \t]{2,}/gu, " ") }));
+  return capitalizeSentenceRuns(collapsed);
+}
+
+/** Put the draft into ordinary screenplay form. Returns how many paragraphs changed. */
+export function smartFormat(script: Script): number {
+  let changed = 0;
+  for (const paragraph of script.paragraphs) {
+    const before = paragraphText(paragraph);
+    if (!before.trim()) continue;
+    if (paragraph.kind === "character" || paragraph.kind === "cast-list") {
+      const next = formatCharacterCue(before);
+      if (next !== before) {
+        paragraph.runs = [{ text: next }];
+        changed += 1;
+      }
+      continue;
+    }
+    if (paragraph.kind === "scene-heading") {
+      const next = formatSlug(before);
+      if (next !== before) {
+        paragraph.runs = [{ text: next }];
+        changed += 1;
+      }
+      continue;
+    }
+    if (paragraph.kind === "transition") {
+      const next = formatTransition(before);
+      if (next !== before) {
+        paragraph.runs = [{ text: next }];
+        changed += 1;
+      }
+      continue;
+    }
+    if (paragraph.kind === "shot" || paragraph.kind === "new-act" || paragraph.kind === "end-of-act" || paragraph.kind === "sequence") {
+      const next = before.trim().replace(/\s+/gu, " ").toUpperCase();
+      if (next !== before) {
+        paragraph.runs = [{ text: next }];
+        changed += 1;
+      }
+      continue;
+    }
+    if (paragraph.kind === "parenthetical") {
+      const next = normalizeParenthetical(before.toLowerCase());
+      if (next !== before) {
+        paragraph.runs = [{ text: next }];
+        changed += 1;
+      }
+      continue;
+    }
+    if (paragraph.kind === "action" || paragraph.kind === "dialogue" || paragraph.kind === "general" || paragraph.kind === "lyric" || paragraph.kind === "singing") {
+      const nextRuns = proseRuns(paragraph.runs);
+      const next = nextRuns.map((run) => run.text).join("");
+      if (next !== before) {
+        paragraph.runs = nextRuns;
+        changed += 1;
+      }
+    }
+  }
+  return changed;
+}
+
 export function characterBase(name: string): string {
   return name
     .replace(/\s*\([^)]*\)\s*$/u, "")

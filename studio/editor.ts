@@ -6,6 +6,7 @@ import { pageMarks } from "../src/text/layout.js";
 import { kindOptions } from "./inspector.js";
 import {
   applyKind,
+  capitalizeSentenceRuns,
   guessKinds,
   markRevisionRange,
   sceneSpans,
@@ -39,6 +40,7 @@ const PLACEHOLDER: Partial<Record<ElementKind, string>> = {
 };
 
 let styleTarget: ((style: "bold" | "italic" | "underline") => void) | null = null;
+const typingStyle = { bold: false, italic: false, underline: false };
 
 export function editorStyle(style: "bold" | "italic" | "underline"): void {
   styleTarget?.(style);
@@ -154,7 +156,12 @@ export function mountEditor(host: HTMLElement, store: Store): () => void {
     const index = Number(focused.dataset.index);
     const paragraph = store.script.paragraphs[index];
     const range = selectionOffsets(focused);
-    if (!paragraph || !range || range.start === range.end) return;
+    if (!paragraph || !range) return;
+    if (range.start === range.end) {
+      typingStyle[style] = !typingStyle[style];
+      store.setStatus(`${style[0]?.toUpperCase() ?? ""}${style.slice(1)} ${typingStyle[style] ? "on" : "off"} for new typing`);
+      return;
+    }
     const sliceStart = Number(focused.dataset.sliceStart ?? 0);
     const sliceEnd = Number(focused.dataset.sliceEnd ?? paragraphText(paragraph).length);
     store.beginBurst();
@@ -178,12 +185,13 @@ export function mountEditor(host: HTMLElement, store: Store): () => void {
     let revisionMark: { offset: number; length: number } | null = null;
     el.addEventListener("beforeinput", () => {
       store.beginBurst();
-      if (!store.revision) {
-        revisionMark = null;
-        return;
-      }
       const current = store.script.paragraphs[Number(el.dataset.index)];
-      revisionMark = { offset: caretOffset(el), length: current ? paragraphText(current).length : 0 };
+      const length = current ? paragraphText(current).length : 0;
+      const at = Number(el.dataset.sliceStart ?? 0) + caretOffset(el);
+      revisionMark = store.revision ? { offset: at, length } : null;
+      if (typingStyle.bold || typingStyle.italic || typingStyle.underline) {
+        revisionMark = { offset: at, length };
+      }
     });
     el.addEventListener("pointerdown", (event) => {
       const here = Number(el.dataset.index);
@@ -211,23 +219,38 @@ export function mountEditor(host: HTMLElement, store: Store): () => void {
       if (!paragraph) return;
       const sliceStart = Number(el.dataset.sliceStart ?? 0);
       const sliceEnd = Number(el.dataset.sliceEnd ?? paragraphText(paragraph).length);
-      let edited = runsFromElement(el);
+      const edited = runsFromElement(el);
       const localOffset = caretOffset(el);
-      if (isUpperKind(paragraph.kind)) {
-        edited = edited.map((run) => ({ ...run, text: run.text.toUpperCase() }));
-      }
-      if (store.revision && revisionMark) {
-        const nextLength = edited.reduce((sum, run) => sum + run.text.length, 0);
-        const added = nextLength - revisionMark.length;
-        if (added > 0) edited = markRevisionRange(edited, revisionMark.offset, revisionMark.offset + added, store.revision);
-        revisionMark = null;
-      }
-      if (isUpperKind(paragraph.kind) || store.revision) writeRuns(el, edited, localOffset);
       const [head] = splitRuns(paragraph.runs, sliceStart);
       const [, tail] = splitRuns(paragraph.runs, sliceEnd);
-      paragraph.runs = joinRuns(joinRuns(head, edited), tail);
+      let runs = joinRuns(joinRuns(head, edited), tail);
+      if (isUpperKind(paragraph.kind)) {
+        runs = runs.map((run) => ({ ...run, text: run.text.toUpperCase() }));
+      } else if (
+        paragraph.kind === "action" ||
+        paragraph.kind === "dialogue" ||
+        paragraph.kind === "general" ||
+        paragraph.kind === "lyric" ||
+        paragraph.kind === "singing"
+      ) {
+        runs = capitalizeSentenceRuns(runs);
+      }
+      const nextLength = runs.reduce((sum, run) => sum + run.text.length, 0);
+      const added = revisionMark ? nextLength - revisionMark.length : 0;
+      if (revisionMark && added > 0) {
+        if (store.revision) runs = markRevisionRange(runs, revisionMark.offset, revisionMark.offset + added, store.revision);
+        if (typingStyle.bold) runs = toggleStyle(runs, revisionMark.offset, revisionMark.offset + added, "bold");
+        if (typingStyle.italic) runs = toggleStyle(runs, revisionMark.offset, revisionMark.offset + added, "italic");
+        if (typingStyle.underline) runs = toggleStyle(runs, revisionMark.offset, revisionMark.offset + added, "underline");
+      }
+      revisionMark = null;
+      paragraph.runs = runs;
       const editedLength = edited.reduce((sum, run) => sum + run.text.length, 0);
       el.dataset.sliceEnd = String(sliceStart + editedLength);
+      const shown = sliceRuns(index, sliceStart, sliceStart + editedLength);
+      const shownText = shown.map((run) => run.text).join("");
+      const domText = edited.map((run) => run.text).join("");
+      if (shownText !== domText) writeRuns(el, shown, localOffset);
       heldCaret = { index, offset: sliceStart + localOffset };
       const text = paragraphText(paragraph);
       if (text === "") el.dataset.placeholder = PLACEHOLDER[paragraph.kind] ?? "";
@@ -289,21 +312,6 @@ export function mountEditor(host: HTMLElement, store: Store): () => void {
       const paragraph = store.script.paragraphs[index];
       if (!paragraph) return;
       const mod = event.ctrlKey || event.metaKey;
-      if (mod && !event.altKey && event.key.toLowerCase() === "b") {
-        event.preventDefault();
-        applyInline("bold");
-        return;
-      }
-      if (mod && !event.altKey && event.key.toLowerCase() === "i") {
-        event.preventDefault();
-        applyInline("italic");
-        return;
-      }
-      if (mod && !event.altKey && event.key.toLowerCase() === "u") {
-        event.preventDefault();
-        applyInline("underline");
-        return;
-      }
       if (!suggest.classList.contains("hidden") && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
         event.preventDefault();
         suggestIndex = (suggestIndex + (event.key === "ArrowDown" ? 1 : items.length - 1)) % items.length;
@@ -634,6 +642,11 @@ export function mountEditor(host: HTMLElement, store: Store): () => void {
     for (const paragraph of store.script.paragraphs) {
       const last = paragraph.runs[paragraph.runs.length - 1];
       if (last && /\n+$/u.test(last.text)) last.text = last.text.replace(/\n+$/u, "");
+      if (!isUpperKind(paragraph.kind)) continue;
+      for (const run of paragraph.runs) {
+        const upper = run.text.toUpperCase();
+        if (upper !== run.text) run.text = upper;
+      }
     }
     const placeCaret = shouldPlaceCaret();
     hideSuggest();

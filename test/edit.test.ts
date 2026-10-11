@@ -6,6 +6,7 @@ import {
   completions,
   cycleKind,
   checkFormatting,
+  smartFormat,
   guessPlainLine,
   paragraphDiff,
   paragraphsFromPlain,
@@ -31,6 +32,35 @@ function scriptWith(paragraphs: Script["paragraphs"]): Script {
 }
 
 describe("screenplay editing", () => {
+  it("smart format forces cues and sentence starts", () => {
+    const slug = makeParagraph("scene-heading", "x");
+    slug.runs = [{ text: "int house night" }];
+    const jacob = makeParagraph("character", "x");
+    jacob.runs = [{ text: "JacOB" }];
+    const voice = makeParagraph("character", "x");
+    voice.runs = [{ text: "jacob (vo)" }];
+    const transition = makeParagraph("transition", "x");
+    transition.runs = [{ text: "cut to" }];
+    const script = scriptWith([
+      slug,
+      makeParagraph("action", "a woman waits. the door opens."),
+      jacob,
+      makeParagraph("parenthetical", "Whispering"),
+      makeParagraph("dialogue", "hello. the house is quiet."),
+      voice,
+      transition,
+    ]);
+    const changed = smartFormat(script);
+    assert.equal(paragraphText(script.paragraphs[0]!), "INT. HOUSE - NIGHT");
+    assert.equal(paragraphText(script.paragraphs[1]!), "A woman waits. The door opens.");
+    assert.equal(paragraphText(script.paragraphs[2]!), "JACOB");
+    assert.equal(paragraphText(script.paragraphs[3]!), "(whispering)");
+    assert.equal(paragraphText(script.paragraphs[4]!), "Hello. The house is quiet.");
+    assert.equal(paragraphText(script.paragraphs[5]!), "JACOB (V.O.)");
+    assert.equal(paragraphText(script.paragraphs[6]!), "CUT TO:");
+    assert.equal(changed, 7);
+  });
+
   it("splits pasted prose into elements", () => {
     const paragraphs = paragraphsFromPlain("INT. KITCHEN - NIGHT\nMAYA\nYou kept it.\nShe nods.");
     assert.equal(paragraphs[0]?.kind, "scene-heading");

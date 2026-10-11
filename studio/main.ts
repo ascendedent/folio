@@ -11,6 +11,7 @@ import {
   sceneSpans,
   characterNames,
   checkFormatting,
+  smartFormat,
   lockPages,
   paragraphDiff,
   templateScript,
@@ -1271,6 +1272,20 @@ async function boot(): Promise<void> {
           },
         })),
         { separator: true },
+        { label: "Bold", shortcut: "Ctrl+B", run: () => editorStyle("bold") },
+        { label: "Italic", shortcut: "Ctrl+I", run: () => editorStyle("italic") },
+        { label: "Underline", shortcut: "Ctrl+U", run: () => editorStyle("underline") },
+        { separator: true },
+        {
+          label: "Smart format",
+          run: () => {
+            let changed = 0;
+            store.transact(() => {
+              changed = smartFormat(store.script);
+            });
+            store.setStatus(changed === 0 ? "Smart format found nothing to change" : `Smart format updated ${changed} lines`);
+          },
+        },
         {
           label: "Tag selection",
           run: tagSelection,
@@ -1523,9 +1538,9 @@ async function boot(): Promise<void> {
     toolButton("Save", saveFdx, "save-script"),
     sep(),
     kindSelect,
-    toolButton("B", () => editorStyle("bold"), "style-bold"),
-    toolButton("I", () => editorStyle("italic"), "style-italic"),
-    toolButton("U", () => editorStyle("underline"), "style-underline"),
+    Object.assign(toolButton("B", () => editorStyle("bold"), "style-bold"), { title: "Bold (Ctrl+B)" }),
+    Object.assign(toolButton("I", () => editorStyle("italic"), "style-italic"), { title: "Italic (Ctrl+I)" }),
+    Object.assign(toolButton("U", () => editorStyle("underline"), "style-underline"), { title: "Underline (Ctrl+U)" }),
     sep(),
   );
   for (const view of VIEWS) {
@@ -1624,6 +1639,14 @@ async function boot(): Promise<void> {
   window.addEventListener("keydown", (event) => {
     const key = event.key.toLowerCase();
     const mod = event.ctrlKey || event.metaKey;
+    if (mod && !event.altKey && !event.shiftKey && (key === "b" || key === "i" || key === "u")) {
+      const active = document.activeElement;
+      if (active instanceof HTMLElement && active.classList.contains("paragraph")) {
+        event.preventDefault();
+        editorStyle(key === "b" ? "bold" : key === "i" ? "italic" : "underline");
+        return;
+      }
+    }
     if (mod && key === "s") {
       event.preventDefault();
       saveFdx();
