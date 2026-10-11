@@ -555,7 +555,7 @@ export function mountEditor(host: HTMLElement, store: Store): () => void {
     const editable = document.createElement("div");
     editable.className = `paragraph kind-${paragraph.kind}`;
     editable.contentEditable = "true";
-    editable.spellcheck = true;
+    editable.spellcheck = paragraph.kind !== "character";
     editable.dataset.index = String(index);
     editable.dataset.sliceStart = String(piece.start);
     editable.dataset.sliceEnd = String(piece.end);
@@ -744,6 +744,7 @@ export function mountEditor(host: HTMLElement, store: Store): () => void {
       }, 280);
     }
     else if (event === "chrome") {
+      fitWidth();
       desk.classList.toggle("show-numbers", store.sceneNumbers);
       desk.classList.toggle("show-watermark", store.watermark);
     } else if (event === "selection" || event === "find") {
@@ -762,12 +763,24 @@ export function mountEditor(host: HTMLElement, store: Store): () => void {
     }
   };
 
+  // A sheet is always a full page wide, so lines wrap where the page count expects.
+  // A narrow pane shrinks the whole desk instead of squeezing the sheet.
+  const fitWidth = (): void => {
+    const room = host.clientWidth - 20;
+    const scale = room > 0 ? Math.min(1, Math.max(0.45, room / ((816 + 48) * store.zoom))) : 1;
+    desk.style.zoom = String(store.zoom * scale);
+  };
+  const resize = new ResizeObserver(fitWidth);
+  resize.observe(host);
+
   const unsubscribe = store.subscribe(onStore);
+  fitWidth();
   paint();
   desk.addEventListener("scroll", hideSuggest, true);
 
   return () => {
     if (styleTarget === applyInline) styleTarget = null;
+    resize.disconnect();
     unsubscribe();
     suggest.remove();
     desk.remove();

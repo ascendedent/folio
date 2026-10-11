@@ -438,7 +438,7 @@ select.kind option {
   min-height: 100%;
   display: flex;
   flex-direction: column;
-  align-items: center;
+  align-items: safe center;
   gap: 28px;
   padding: 28px 24px 72px;
   background:
@@ -447,7 +447,8 @@ select.kind option {
 }
 
 .sheet {
-  width: min(816px, calc(100% - 8px));
+  flex: none;
+  width: 816px;
   min-height: 1056px;
   background: var(--paper);
   color: var(--ink);
@@ -920,6 +921,6 @@ select.kind option {
   .top, .toolbar, .findbar, .nav, .inspector, .statusbar, .board-bar, .suggest { display: none !important; }
   .app { min-width: 0; display: block; height: auto; }
   .workspace, .stage, .split { display: block; overflow: visible; height: auto; }
-  .desk { background: white; padding: 0; }
+  .desk { background: white; padding: 0; zoom: 1 !important; }
   .sheet { box-shadow: none; width: auto; page-break-after: always; }
 }

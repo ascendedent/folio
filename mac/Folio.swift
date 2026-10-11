@@ -95,6 +95,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
     let handler = StudioScheme(root: root)
     scheme = handler
+    // Underline misspelled words and list suggestions in the right-click menu,
+    // without autocorrect changing character names.
+    UserDefaults.standard.register(defaults: [
+      "WebContinuousSpellCheckingEnabled": true,
+      "WebAutomaticSpellingCorrectionEnabled": false,
+    ])
     let config = WKWebViewConfiguration()
     config.setURLSchemeHandler(handler, forURLScheme: "folio")
     let view = WKWebView(frame: NSRect(x: 0, y: 0, width: 1280, height: 840), configuration: config)

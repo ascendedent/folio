@@ -63,6 +63,18 @@ def studio_file(uri_path: str) -> Path | None:
     return None
 
 
+def spelling_languages() -> list[str]:
+    wanted = []
+    for name in GLib.get_language_names():
+        if name == "C" or "." in name or "@" in name or "_" not in name:
+            continue
+        if name not in wanted:
+            wanted.append(name)
+    if "en_US" not in wanted:
+        wanted.append("en_US")
+    return wanted
+
+
 def on_scheme(request: WebKit2.URISchemeRequest, _data=None) -> None:
     path = studio_file(request.get_path() or "/")
     if path is None:
@@ -85,6 +97,9 @@ class Folio(Gtk.Application):
         context = WebKit2.WebContext()
         context.register_uri_scheme("folio", on_scheme)
         context.connect("download-started", self.on_download)
+        # Underline misspelled words and list suggestions in the right-click menu.
+        context.set_spell_checking_enabled(True)
+        context.set_spell_checking_languages(spelling_languages())
         web = WebKit2.WebView.new_with_context(context)
         settings = web.get_settings()
         settings.set_enable_write_console_messages_to_stdout(True)
