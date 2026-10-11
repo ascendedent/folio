@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Folio
+Comment=Screenplay studio
+Exec=/usr/bin/python3 __FOLIO_DIR__/folio.py
+Icon=__FOLIO_DIR__/favicon.png
+Terminal=false
+Type=Application
+Categories=Office;
+Keywords=screenplay;fdx;fountain;
+StartupWMClass=folio
+StartupNotify=true

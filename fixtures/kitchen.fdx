@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<FinalDraft DocumentType="Script" Template="No" Version="5">
+  <Content>
+    <Paragraph Type="Outline 1">
+      <Text>Act One</Text>
+    </Paragraph>
+    <Paragraph Type="Outline Body">
+      <Text>She finds the letter.</Text>
+    </Paragraph>
+    <Paragraph Type="Scene Heading" Number="1">
+      <SceneProperties Length="1/8" Page="1" Title="">
+        <Summary>
+          <Paragraph Type="General">
+            <Text>Maya finds the letter in the coat.</Text>
+          </Paragraph>
+        </Summary>
+        <SceneArcBeats>
+          <CharacterArcBeat Name="MAYA"></CharacterArcBeat>
+        </SceneArcBeats>
+      </SceneProperties>
+      <Text>INT. KITCHEN - NIGHT</Text>
+    </Paragraph>
+    <Paragraph Type="Action">
+      <Text>MAYA stands at the counter. A </Text>
+      <Text Style="Bold">coat</Text>
+      <Text> drips on the chair.</Text>
+      <ScriptNote>
+        <Paragraph Type="General">
+          <Text>Hold on the coat.</Text>
+        </Paragraph>
+      </ScriptNote>
+    </Paragraph>
+    <DualDialogue>
+      <Paragraph Type="Character">
+        <Text>MAYA</Text>
+      </Paragraph>
+      <Paragraph Type="Dialogue">
+        <Text>You kept it.</Text>
+      </Paragraph>
+      <Paragraph Type="Character">
+        <Text>JON</Text>
+      </Paragraph>
+      <Paragraph Type="Dialogue">
+        <Text>I kept the pocket.</Text>
+      </Paragraph>
+    </DualDialogue>
+    <Paragraph Type="Action">
+      <Text>She doesn't look at him.</Text>
+    </Paragraph>
+    <Paragraph Type="Transition">
+      <Text>CUT TO:</Text>
+    </Paragraph>
+    <Paragraph Type="Scene Heading" Number="2">
+      <Text>EXT. STREET - NIGHT</Text>
+    </Paragraph>
+    <Paragraph Type="Action">
+      <Text>Rain.</Text>
+    </Paragraph>
+    <Paragraph Type="Character">
+      <Text>MAYA (V.O.)</Text>
+    </Paragraph>
+    <Paragraph Type="Dialogue">
+      <Text>The pocket was the whole point.</Text>
+    </Paragraph>
+  </Content>
+  <TitlePage>
+    <Content>
+      <Paragraph Type="Title" Alignment="Center">
+        <Text>KITCHEN LETTER</Text>
+      </Paragraph>
+      <Paragraph Type="Credit" Alignment="Center">
+        <Text>Written by</Text>
+      </Paragraph>
+      <Paragraph Type="Author" Alignment="Center">
+        <Text>A. Example</Text>
+      </Paragraph>
+    </Content>
+  </TitlePage>
+  <BeatBoard>
+    <Beat id="b1" X="120" Y="40" Color="Gold" Title="Opening">
+      <Body>She burns the letter.</Body>
+      <FlowLine To="b2"></FlowLine>
+    </Beat>
+    <Beat id="b2" X="360" Y="40" Color="Blue" Title="Turn">
+      <Body>The letter is in his coat.</Body>
+    </Beat>
+  </BeatBoard>
+</FinalDraft>

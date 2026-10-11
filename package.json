@@ -1,0 +1,35 @@
+{
+  "name": "folio",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Linux screenplay studio. Reads and writes FDX, Fountain, and formatted text.",
+  "type": "module",
+  "bin": {
+    "folio": "./dist/cli.js"
+  },
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit && tsc -p studio/tsconfig.json --noEmit",
+    "test": "node --import tsx --test test/*.test.ts",
+    "folio": "tsx src/cli.ts",
+    "mcp": "tsx src/mcp.ts",
+    "studio": "vite --host 127.0.0.1",
+    "studio:build": "vite build"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@xmldom/xmldom": "^0.9.8"
+  },
+  "devDependencies": {
+    "@types/node": "^24.9.1",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "vite": "^6.3.5"
+  }
+}
