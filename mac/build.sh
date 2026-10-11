@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 export PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 IDENTITY="${FOLIO_SIGN_IDENTITY:-Apple Development: JOSEPH SOTO MAROTTA (25QQ6F7V8M)}"
-APP="${FOLIO_APP_PATH:-$HOME/Applications/Folio.app}"
+APP="${FOLIO_APP_PATH:-/Applications/Folio.app}"
 
 echo "node $(node -v)  npm $(npm -v)"
 npm ci

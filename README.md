@@ -26,7 +26,7 @@ npm run studio
 
 Opens at `http://127.0.0.1:4730`. The sample is the kitchen letter, with two beat cards already on the board. A draft is kept on this computer. Autosave waits a moment, stores pictures outside the script text, and says so if the save fails. Courier Prime is included, so the page does not depend on a network font.
 
-On a Mac, `mac/build.sh` compiles the same studio into `Folio.app` and signs it with the Apple Development identity already on that Mac. The app lives in `~/Applications`.
+On a Mac, `mac/build.sh` compiles the same studio into `Folio.app` and signs it with the Apple Development identity already on that Mac. The app lives in `/Applications`.
 
 On this Fedora machine, `linux/install.sh` installs a Folio window into the application menu. It does not start the dev server.
 

@@ -8,17 +8,10 @@ export PATH="/usr/bin:/bin:$PATH"
 npm run studio:build -- --base ./
 python3 mac/icon.py
 
-remembered=""
-if [[ -f "$DEST/last-open.json" ]]; then
-  remembered="$(mktemp)"
-  cp "$DEST/last-open.json" "$remembered"
-fi
-rm -rf "$DEST"
+# WebKit keeps the autosaved draft and settings in $DEST too (databases/,
+# localstorage/), beside last-open.json. Replace only the app's own files.
+rm -rf "$DEST/studio"
 mkdir -p "$DEST/studio" "$HOME/.local/share/applications" "$HOME/.local/share/icons/hicolor/256x256/apps"
-if [[ -n "$remembered" ]]; then
-  cp "$remembered" "$DEST/last-open.json"
-  rm -f "$remembered"
-fi
 cp linux/folio.py "$DEST/folio.py"
 cp studio/favicon.png "$DEST/favicon.png"
 cp -R dist-studio/. "$DEST/studio/"
