@@ -488,6 +488,7 @@ select.kind option {
   gap: 4px;
   position: relative;
   margin-top: 16px;
+  align-items: start;
 }
 
 .row:has(.kind-dialogue),
@@ -510,14 +511,19 @@ select.kind option {
   font-size: 16px;
   line-height: 20px;
   min-height: 20px;
+  display: inline-block;
+  vertical-align: top;
+  width: auto;
+  max-width: 100%;
   white-space: pre-wrap;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
   outline: none;
   border-radius: 2px;
 }
 
 .paragraph:focus { background: rgba(198, 163, 107, 0.16); }
 
+.paragraph[data-placeholder] { min-width: 12ch; }
 .paragraph[data-placeholder]:empty::before {
   content: attr(data-placeholder);
   color: #b7afA1;

@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { readFdx } from "../src/fdx/read.js";
 import { readFountain } from "../src/fountain/parse.js";
-import { KIND_FDX, type ElementKind, type Paragraph, type Script } from "../src/model.js";
+import { KIND_FDX, paragraphText, type ElementKind, type Paragraph, type Script } from "../src/model.js";
 import { formatRtf } from "../src/text/rtf.js";
 import { formatText, LINES_PER_PAGE, layoutScript, pageMarks, pagePieces, paragraphPages, pullOrphans, type LayoutPage } from "../src/text/layout.js";
 import { formatPdf } from "../src/text/pdf.js";
@@ -46,6 +47,14 @@ describe("formatted text", () => {
       words,
     );
     assert.ok(hits[1]!.pageIndex > hits[0]!.pageIndex);
+  });
+
+  it("keeps both sides of a dual dialogue", () => {
+    const script = readFdx(fixture("kitchen.fdx"));
+    const pieces = pagePieces(script).flat();
+    assert.ok(pieces.some((piece) => paragraphText(script.paragraphs[piece.index] ?? script.paragraphs[0]!) === "You kept it."));
+    assert.ok(pieces.some((piece) => paragraphText(script.paragraphs[piece.index] ?? script.paragraphs[0]!) === "JON"));
+    assert.ok(pieces.some((piece) => paragraphText(script.paragraphs[piece.index] ?? script.paragraphs[0]!) === "I kept the pocket."));
   });
 
   it("assigns a page to every paragraph", () => {

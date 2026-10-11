@@ -46,7 +46,16 @@ export function runsFromElement(root: HTMLElement): TextRun[] {
     for (const child of node.childNodes) walk(child, next);
   };
   for (const child of root.childNodes) walk(child, {});
-  if (runs.length === 1 && runs[0]?.text === "\n") return [{ text: "" }];
+  while (runs.length > 0) {
+    const last = runs[runs.length - 1];
+    if (!last) break;
+    if (last.text === "\n" || last.text === "") {
+      runs.pop();
+      continue;
+    }
+    if (last.text.endsWith("\n")) last.text = last.text.replace(/\n+$/u, "");
+    break;
+  }
   return runs.length > 0 ? runs : [{ text: "" }];
 }
 

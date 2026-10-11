@@ -521,6 +521,19 @@ export function pagePieces(script: Script): PagePiece[][] {
         cursor += count;
         continue;
       }
+      if (paragraph.dualGroup !== undefined) {
+        const group = paragraph.dualGroup;
+        const already = pieces[pageIndex]?.some((piece) => script.paragraphs[piece.index]?.dualGroup === group);
+        if (!already) {
+          for (let member = 0; member < script.paragraphs.length; member += 1) {
+            const item = script.paragraphs[member];
+            if (item?.dualGroup !== group) continue;
+            pieces[pageIndex]?.push({ index: member, start: 0, end: paragraphText(item).length });
+          }
+        }
+        cursor += count;
+        continue;
+      }
       const text = paragraphText(paragraph);
       let source = ranges.get(origin);
       if (!source) {

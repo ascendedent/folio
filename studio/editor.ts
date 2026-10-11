@@ -631,6 +631,10 @@ export function mountEditor(host: HTMLElement, store: Store): () => void {
   };
 
   const paint = (): void => {
+    for (const paragraph of store.script.paragraphs) {
+      const last = paragraph.runs[paragraph.runs.length - 1];
+      if (last && /\n+$/u.test(last.text)) last.text = last.text.replace(/\n+$/u, "");
+    }
     const placeCaret = shouldPlaceCaret();
     hideSuggest();
     omitted = new Set();
