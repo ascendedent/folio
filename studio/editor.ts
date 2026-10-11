@@ -24,7 +24,7 @@ import {
   toggleStyle,
 } from "../src/edit.js";
 import { paragraphText, scriptTitle, type ElementKind, type Paragraph, type TextRun } from "../src/model.js";
-import { paragraphPages } from "../src/text/layout.js";
+import { pagePieces, paragraphPages, type PagePiece } from "../src/text/layout.js";
 
 const PLACEHOLDER: Partial<Record<ElementKind, string>> = {
   "scene-heading": "INT. LOCATION - DAY",
@@ -155,9 +155,11 @@ export function mountEditor(host: HTMLElement, store: Store): () => void {
     const paragraph = store.script.paragraphs[index];
     const range = selectionOffsets(focused);
     if (!paragraph || !range || range.start === range.end) return;
+    const sliceStart = Number(focused.dataset.sliceStart ?? 0);
+    const sliceEnd = Number(focused.dataset.sliceEnd ?? paragraphText(paragraph).length);
     store.beginBurst();
-    paragraph.runs = toggleStyle(paragraph.runs, range.start, range.end, style);
-    writeRuns(focused, paragraph.runs, range.end);
+    paragraph.runs = toggleStyle(paragraph.runs, sliceStart + range.start, sliceStart + range.end, style);
+    writeRuns(focused, sliceRuns(index, sliceStart, sliceEnd), range.end);
     store.noteText();
   };
 
@@ -207,19 +209,26 @@ export function mountEditor(host: HTMLElement, store: Store): () => void {
       const index = Number(el.dataset.index);
       const paragraph = store.script.paragraphs[index];
       if (!paragraph) return;
-      let runs = runsFromElement(el);
-      const offset = caretOffset(el);
+      const sliceStart = Number(el.dataset.sliceStart ?? 0);
+      const sliceEnd = Number(el.dataset.sliceEnd ?? paragraphText(paragraph).length);
+      let edited = runsFromElement(el);
+      const localOffset = caretOffset(el);
       if (isUpperKind(paragraph.kind)) {
-        runs = runs.map((run) => ({ ...run, text: run.text.toUpperCase() }));
+        edited = edited.map((run) => ({ ...run, text: run.text.toUpperCase() }));
       }
       if (store.revision && revisionMark) {
-        const nextLength = runs.reduce((sum, run) => sum + run.text.length, 0);
+        const nextLength = edited.reduce((sum, run) => sum + run.text.length, 0);
         const added = nextLength - revisionMark.length;
-        if (added > 0) runs = markRevisionRange(runs, revisionMark.offset, revisionMark.offset + added, store.revision);
+        if (added > 0) edited = markRevisionRange(edited, revisionMark.offset, revisionMark.offset + added, store.revision);
         revisionMark = null;
       }
-      if (isUpperKind(paragraph.kind) || store.revision) writeRuns(el, runs, offset);
-      paragraph.runs = runs;
+      if (isUpperKind(paragraph.kind) || store.revision) writeRuns(el, edited, localOffset);
+      const [head] = splitRuns(paragraph.runs, sliceStart);
+      const [, tail] = splitRuns(paragraph.runs, sliceEnd);
+      paragraph.runs = joinRuns(joinRuns(head, edited), tail);
+      const editedLength = edited.reduce((sum, run) => sum + run.text.length, 0);
+      el.dataset.sliceEnd = String(sliceStart + editedLength);
+      heldCaret = { index, offset: sliceStart + localOffset };
       const text = paragraphText(paragraph);
       if (text === "") el.dataset.placeholder = PLACEHOLDER[paragraph.kind] ?? "";
       else delete el.dataset.placeholder;
@@ -265,11 +274,14 @@ export function mountEditor(host: HTMLElement, store: Store): () => void {
         });
         return;
       }
-      const offset = caretOffset(el);
+      const sliceStart = Number(el.dataset.sliceStart ?? 0);
+      const offset = sliceStart + caretOffset(el);
       store.beginBurst();
       const [left, right] = splitRuns(paragraph.runs, offset);
       paragraph.runs = joinRuns(joinRuns(left, [{ text }]), right);
-      writeRuns(el, paragraph.runs, offset + text.length);
+      el.dataset.sliceEnd = String(Number(el.dataset.sliceEnd ?? offset) + text.length);
+      writeRuns(el, sliceRuns(index, sliceStart, Number(el.dataset.sliceEnd)), offset - sliceStart + text.length);
+      heldCaret = { index, offset: offset + text.length };
       store.noteText();
     });
     el.addEventListener("keydown", (event) => {
@@ -309,7 +321,7 @@ export function mountEditor(host: HTMLElement, store: Store): () => void {
         hideSuggest();
         tabWalk = null;
         if (!option) return;
-        const offset = caretOffset(el);
+        const offset = Number(el.dataset.sliceStart ?? 0) + caretOffset(el);
         store.transact(() => {
           applyKind(paragraph, option.kind);
           store.caret = { index, offset };
@@ -320,7 +332,7 @@ export function mountEditor(host: HTMLElement, store: Store): () => void {
         event.preventDefault();
         const option = kindOptions()[Number(event.key) - 1];
         if (!option) return;
-        const offset = caretOffset(el);
+        const offset = Number(el.dataset.sliceStart ?? 0) + caretOffset(el);
         store.transact(() => {
           applyKind(paragraph, option.kind);
           store.caret = { index, offset };
@@ -330,7 +342,7 @@ export function mountEditor(host: HTMLElement, store: Store): () => void {
       if (event.key === "Tab") {
         event.preventDefault();
         hideSuggest();
-        const offset = caretOffset(el);
+        const offset = Number(el.dataset.sliceStart ?? 0) + caretOffset(el);
         const previous = index > 0 ? (store.script.paragraphs[index - 1]?.kind ?? null) : null;
         if (!tabWalk || tabWalk.index !== index) {
           tabWalk = { index, from: paragraph.kind, text: paragraphText(paragraph), previous, step: 0 };
@@ -359,7 +371,7 @@ export function mountEditor(host: HTMLElement, store: Store): () => void {
           if (chosen) accept(el, chosen);
           return;
         }
-        const offset = caretOffset(el);
+        const offset = Number(el.dataset.sliceStart ?? 0) + caretOffset(el);
         const [left, right] = splitRuns(paragraph.runs, offset);
         const before = left.map((run) => run.text).join("");
         const atEnd = offset >= paragraphText(paragraph).length;
@@ -454,6 +466,18 @@ export function mountEditor(host: HTMLElement, store: Store): () => void {
       const collapsed = window.getSelection()?.isCollapsed ?? true;
       if (event.key === "Backspace" && collapsed && caretOffset(el) === 0) {
         event.preventDefault();
+        const sliceStart = Number(el.dataset.sliceStart ?? 0);
+        if (sliceStart > 0) {
+          store.beginBurst();
+          const [left, right] = splitRuns(paragraph.runs, sliceStart - 1);
+          const [, tail] = splitRuns(right, 1);
+          paragraph.runs = joinRuns(left, tail);
+          heldCaret = { index, offset: sliceStart - 1 };
+          store.caret = heldCaret;
+          pageSignature = "";
+          store.noteText();
+          return;
+        }
         if (index === 0) return;
         const previous = store.script.paragraphs[index - 1];
         if (!previous) return;
@@ -471,17 +495,18 @@ export function mountEditor(host: HTMLElement, store: Store): () => void {
         return;
       }
       if (event.key === "ArrowUp" && collapsed && caretOffset(el) === 0 && suggest.classList.contains("hidden")) {
-        if (index === 0) return;
-        event.preventDefault();
-        const previous = desk.querySelector<HTMLElement>(`.paragraph[data-index="${index - 1}"]`);
+        const all = [...desk.querySelectorAll<HTMLElement>(".paragraph")];
+        const previous = all[all.indexOf(el) - 1];
         if (!previous) return;
+        event.preventDefault();
         setCaret(previous, runsFromElement(previous).reduce((sum, run) => sum + run.text.length, 0));
         return;
       }
       if (event.key === "ArrowDown" && collapsed && suggest.classList.contains("hidden")) {
-        const length = paragraphText(paragraph).length;
-        if (caretOffset(el) < length) return;
-        const next = desk.querySelector<HTMLElement>(`.paragraph[data-index="${index + 1}"]`);
+        const shown = runsFromElement(el).reduce((sum, run) => sum + run.text.length, 0);
+        if (caretOffset(el) < shown) return;
+        const all = [...desk.querySelectorAll<HTMLElement>(".paragraph")];
+        const next = all[all.indexOf(el) + 1];
         if (!next) return;
         event.preventDefault();
         setCaret(next, 0);
@@ -490,8 +515,19 @@ export function mountEditor(host: HTMLElement, store: Store): () => void {
   };
 
   let omitted = new Set<number>();
+  let pageSignature = "";
+  let heldCaret: { index: number; offset: number } | null = null;
 
-  const rowFor = (index: number): HTMLElement => {
+  const sliceRuns = (index: number, start: number, end: number): TextRun[] => {
+    const paragraph = store.script.paragraphs[index];
+    if (!paragraph) return [{ text: "" }];
+    const [, tail] = splitRuns(paragraph.runs, start);
+    const [head] = splitRuns(tail, Math.max(0, end - start));
+    return head;
+  };
+
+  const rowFor = (piece: PagePiece): HTMLElement => {
+    const index = piece.index;
     const paragraph = store.script.paragraphs[index];
     const row = document.createElement("div");
     row.className = "row";
@@ -513,11 +549,13 @@ export function mountEditor(host: HTMLElement, store: Store): () => void {
     editable.contentEditable = "true";
     editable.spellcheck = true;
     editable.dataset.index = String(index);
+    editable.dataset.sliceStart = String(piece.start);
+    editable.dataset.sliceEnd = String(piece.end);
     editable.dataset.testid = "paragraph";
     editable.dataset.kind = paragraph.kind;
     editable.setAttribute("role", "textbox");
     editable.setAttribute("aria-label", paragraph.kind);
-    editable.innerHTML = runsToHtml(paragraph.runs);
+    editable.innerHTML = runsToHtml(sliceRuns(index, piece.start, piece.end));
     if (paragraphText(paragraph) === "") editable.dataset.placeholder = PLACEHOLDER[paragraph.kind] ?? "";
     if (paragraph.kind === "character") {
       editable.style.setProperty("--cue", characterColor(characterBase(paragraphText(paragraph)) || "A"));
@@ -541,33 +579,33 @@ export function mountEditor(host: HTMLElement, store: Store): () => void {
     return row;
   };
 
-  const renderBlock = (body: HTMLElement, indices: number[]): void => {
+  const renderBlock = (body: HTMLElement, pieces: PagePiece[]): void => {
     let cursor = 0;
-    while (cursor < indices.length) {
-      const index = indices[cursor];
-      const paragraph = index === undefined ? undefined : store.script.paragraphs[index];
-      if (index === undefined || !paragraph) {
+    while (cursor < pieces.length) {
+      const piece = pieces[cursor];
+      const paragraph = piece ? store.script.paragraphs[piece.index] : undefined;
+      if (!piece || !paragraph) {
         cursor += 1;
         continue;
       }
       const group = paragraph.dualGroup;
       if (group === undefined) {
-        body.append(rowFor(index));
+        body.append(rowFor(piece));
         cursor += 1;
         continue;
       }
-      const members: number[] = [];
-      while (cursor < indices.length) {
-        const candidate = indices[cursor];
-        if (candidate === undefined || store.script.paragraphs[candidate]?.dualGroup !== group) break;
+      const members: PagePiece[] = [];
+      while (cursor < pieces.length) {
+        const candidate = pieces[cursor];
+        if (!candidate || store.script.paragraphs[candidate.index]?.dualGroup !== group) break;
         members.push(candidate);
         cursor += 1;
       }
       const dual = document.createElement("div");
       dual.className = "dual";
-      const speeches: number[][] = [];
+      const speeches: PagePiece[][] = [];
       for (const member of members) {
-        if (store.script.paragraphs[member]?.kind === "character" || speeches.length === 0) speeches.push([member]);
+        if (store.script.paragraphs[member.index]?.kind === "character" || speeches.length === 0) speeches.push([member]);
         else speeches[speeches.length - 1]?.push(member);
       }
       for (const speech of speeches.slice(0, 2)) {
@@ -605,17 +643,12 @@ export function mountEditor(host: HTMLElement, store: Store): () => void {
     desk.classList.toggle("show-numbers", store.sceneNumbers);
     desk.classList.toggle("show-watermark", store.watermark);
     desk.replaceChildren();
-    const pages = paragraphPages(store.script);
-    const groups: number[][] = [];
-    store.script.paragraphs.forEach((_, index) => {
-      const page = pages[index] ?? 1;
-      while (groups.length < page) groups.push([]);
-      groups[page - 1]?.push(index);
-    });
+    const groups = pagePieces(store.script);
     if (groups.length === 0) groups.push([]);
+    pageSignature = groups.map((page) => page.map((piece) => `${piece.index}:${piece.start}:${piece.end}`).join(",")).join("|");
     const title = scriptTitle(store.script);
     const marks = pageMarks(store.script);
-    groups.forEach((indices, pageIndex) => {
+    groups.forEach((pieces, pageIndex) => {
       const sheet = document.createElement("section");
       sheet.className = "sheet";
       sheet.dataset.testid = "sheet";
@@ -628,7 +661,7 @@ export function mountEditor(host: HTMLElement, store: Store): () => void {
       if (slug && pageIndex > 0) slug.textContent = title;
       const number = document.createElement("span");
       number.className = "sheet-num";
-      const first = indices[0];
+      const first = pieces[0]?.index;
       if (pageIndex > 0 && first !== undefined) number.textContent = `${displayPage(store.script, first, pageIndex + 1)}.`;
       head.append(number);
       const body = document.createElement("div");
@@ -640,7 +673,7 @@ export function mountEditor(host: HTMLElement, store: Store): () => void {
         banner.textContent = `${mark.continuedName} (CONT'D)`;
         body.append(banner);
       }
-      renderBlock(body, indices);
+      renderBlock(body, pieces);
       if (mark?.more) {
         const more = document.createElement("div");
         more.className = "more-line";
@@ -656,9 +689,17 @@ export function mountEditor(host: HTMLElement, store: Store): () => void {
     }
     const target = caret ?? (store.selection?.type === "paragraph" ? { index: store.selection.index, offset: 0 } : null);
     if (!target) return;
-    const el = desk.querySelector<HTMLElement>(`.paragraph[data-index="${target.index}"]`);
+    const matches = [...desk.querySelectorAll<HTMLElement>(`.paragraph[data-index="${target.index}"]`)];
+    const el =
+      matches.find((node) => {
+        const start = Number(node.dataset.sliceStart ?? 0);
+        const end = Number(node.dataset.sliceEnd ?? 0);
+        return target.offset >= start && target.offset < end;
+      }) ??
+      matches.find((node) => Number(node.dataset.sliceEnd ?? 0) >= target.offset) ??
+      matches[matches.length - 1];
     if (!el) return;
-    if (caret) setCaret(el, caret.offset);
+    if (caret) setCaret(el, target.offset - Number(el.dataset.sliceStart ?? 0));
     else el.scrollIntoView({ block: "nearest" });
     const range = store.selection?.type === "paragraph" ? store.selection : null;
     if (range?.start !== undefined && range.end !== undefined) setRange(el, range.start, range.end);
@@ -669,9 +710,18 @@ export function mountEditor(host: HTMLElement, store: Store): () => void {
     else if (event === "text") {
       window.clearTimeout(pageTimer);
       pageTimer = window.setTimeout(() => {
-        const active = document.activeElement;
-        if (active instanceof HTMLElement && desk.contains(active) && active.dataset.index) {
-          store.caret = { index: Number(active.dataset.index), offset: caretOffset(active) };
+        const groups = pagePieces(store.script);
+        const signature = groups.map((page) => page.map((piece) => `${piece.index}:${piece.start}:${piece.end}`).join(",")).join("|");
+        if (signature === pageSignature) return;
+        if (heldCaret) store.caret = heldCaret;
+        else {
+          const active = document.activeElement;
+          if (active instanceof HTMLElement && desk.contains(active) && active.dataset.index) {
+            store.caret = {
+              index: Number(active.dataset.index),
+              offset: Number(active.dataset.sliceStart ?? 0) + caretOffset(active),
+            };
+          }
         }
         paint();
       }, 280);

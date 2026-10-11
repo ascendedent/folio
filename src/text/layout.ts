@@ -408,6 +408,159 @@ function spillOverflow(pages: LayoutPage[]): boolean {
   return spilled;
 }
 
+export interface PagePiece {
+  index: number;
+  /** Start offset in the paragraph text. */
+  start: number;
+  /** End offset in the paragraph text. The pieces of one paragraph cover it without gaps. */
+  end: number;
+}
+
+function wrapWidth(kind: string): number {
+  if (kind === "dialogue" || kind === "lyric" || kind === "singing") return DIALOGUE_WIDTH;
+  if (kind === "parenthetical") return PAREN_WIDTH;
+  if (kind === "character" || kind === "cast-list") return ACTION_WIDTH - CHARACTER_INDENT;
+  return ACTION_WIDTH;
+}
+
+/** Offsets of each wrapped line. Adjacent ranges meet, and together they cover the whole string. */
+function sourceRanges(text: string, width: number): { start: number; end: number }[] {
+  const lead = text.length - text.trimStart().length;
+  const body = text.trim();
+  const ranges: { start: number; end: number }[] = [];
+  let origin = 0;
+  for (const part of body.split("\n")) {
+    const words: { start: number; end: number }[] = [];
+    const matcher = /\S+/gu;
+    let found: RegExpExecArray | null;
+    while ((found = matcher.exec(part))) words.push({ start: origin + found.index, end: origin + found.index + found[0].length });
+    if (words.length === 0) ranges.push({ start: origin, end: origin });
+    else {
+      let start = words[0]?.start ?? origin;
+      let end = words[0]?.end ?? origin;
+      let length = end - start;
+      for (const word of words.slice(1)) {
+        const wordLength = word.end - word.start;
+        if (wordLength > width) {
+          if (length > 0) ranges.push({ start, end });
+          for (let at = word.start; at < word.end; at += width) {
+            ranges.push({ start: at, end: Math.min(word.end, at + width) });
+          }
+          start = word.end;
+          end = word.end;
+          length = 0;
+          continue;
+        }
+        const next = length === 0 ? wordLength : length + 1 + wordLength;
+        if (length > 0 && next > width) {
+          ranges.push({ start, end });
+          start = word.start;
+          end = word.end;
+          length = wordLength;
+        } else {
+          if (length === 0) start = word.start;
+          end = word.end;
+          length = next;
+        }
+      }
+      if (length > 0) ranges.push({ start, end });
+    }
+    origin += part.length + 1;
+  }
+  if (ranges.length === 0) return [{ start: 0, end: text.length }];
+  const shifted = ranges.map((range) => ({ start: range.start + lead, end: range.end + lead }));
+  for (let index = 0; index < shifted.length - 1; index += 1) {
+    const next = shifted[index + 1];
+    const current = shifted[index];
+    if (current && next) current.end = next.start;
+  }
+  const first = shifted[0];
+  const last = shifted[shifted.length - 1];
+  if (first) first.start = 0;
+  if (last) last.end = text.length;
+  return shifted;
+}
+
+/**
+ * The paragraphs on each printed page. A paragraph that crosses a page is
+ * split into pieces so the editor can continue it on the next sheet.
+ */
+export function pagePieces(script: Script): PagePiece[][] {
+  const pages = layoutScript(script);
+  const counts = new Map<number, number>();
+  for (const page of pages) {
+    for (const line of page.lines) {
+      if (line.origin === undefined || line.kind === "blank" || line.kind === "page-break") continue;
+      counts.set(line.origin, (counts.get(line.origin) ?? 0) + 1);
+    }
+  }
+  const ranges = new Map<number, { start: number; end: number }[]>();
+  const used = new Map<number, number>();
+  const pieces: PagePiece[][] = pages.map(() => []);
+  for (let pageIndex = 0; pageIndex < pages.length; pageIndex += 1) {
+    const lines = pages[pageIndex]?.lines ?? [];
+    let cursor = 0;
+    while (cursor < lines.length) {
+      const line = lines[cursor];
+      if (!line || line.origin === undefined || line.kind === "blank" || line.kind === "page-break") {
+        cursor += 1;
+        continue;
+      }
+      const origin = line.origin;
+      let count = 0;
+      while (
+        cursor + count < lines.length &&
+        lines[cursor + count]?.origin === origin &&
+        lines[cursor + count]?.kind !== "blank" &&
+        lines[cursor + count]?.kind !== "page-break"
+      ) {
+        count += 1;
+      }
+      const paragraph = script.paragraphs[origin];
+      if (!paragraph) {
+        cursor += count;
+        continue;
+      }
+      const text = paragraphText(paragraph);
+      let source = ranges.get(origin);
+      if (!source) {
+        source = sourceRanges(text, wrapWidth(paragraph.kind));
+        const expected = counts.get(origin) ?? 0;
+        if (source.length !== expected) source = [{ start: 0, end: text.length }];
+        ranges.set(origin, source);
+      }
+      const taken = used.get(origin) ?? 0;
+      if (taken >= source.length) {
+        cursor += count;
+        continue;
+      }
+      const portion = source.length === 1 ? source : source.slice(taken, taken + count);
+      const start = portion[0]?.start ?? 0;
+      const end = portion[portion.length - 1]?.end ?? text.length;
+      pieces[pageIndex]?.push({ index: origin, start, end });
+      used.set(origin, source.length === 1 ? source.length : taken + portion.length);
+      cursor += count;
+    }
+  }
+  if (pieces.length === 0) pieces.push([]);
+  for (let index = 0; index < script.paragraphs.length; index += 1) {
+    const paragraph = script.paragraphs[index];
+    if (!paragraph || (paragraph.kind !== "note" && paragraph.kind !== "page-break")) continue;
+    if (pieces.some((page) => page.some((piece) => piece.index === index))) continue;
+    let host = 0;
+    for (let pageIndex = 0; pageIndex < pieces.length; pageIndex += 1) {
+      if (pieces[pageIndex]?.some((piece) => piece.index < index)) host = pageIndex;
+    }
+    const page = pieces[host] ?? pieces[0];
+    if (!page) continue;
+    const at = page.findIndex((piece) => piece.index > index);
+    const piece = { index, start: 0, end: paragraphText(paragraph).length };
+    if (at < 0) page.push(piece);
+    else page.splice(at, 0, piece);
+  }
+  return pieces;
+}
+
 /** Page number for each paragraph, using the same pagination as formatted text. */
 export function paragraphPages(script: Script): number[] {
   const pages = layoutScript(script);

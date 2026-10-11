@@ -453,8 +453,7 @@ select.kind option {
   color: var(--ink);
   position: relative;
   box-shadow: 0 1px 0 rgba(255, 255, 255, 0.45) inset, var(--shadow);
-  content-visibility: auto;
-  contain-intrinsic-size: auto 1056px;
+  overflow: visible;
 }
 
 .sheet-head {

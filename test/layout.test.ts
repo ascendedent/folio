@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 import { readFountain } from "../src/fountain/parse.js";
 import { KIND_FDX, type ElementKind, type Paragraph, type Script } from "../src/model.js";
 import { formatRtf } from "../src/text/rtf.js";
-import { formatText, LINES_PER_PAGE, layoutScript, pageMarks, paragraphPages, pullOrphans, type LayoutPage } from "../src/text/layout.js";
+import { formatText, LINES_PER_PAGE, layoutScript, pageMarks, pagePieces, paragraphPages, pullOrphans, type LayoutPage } from "../src/text/layout.js";
 import { formatPdf } from "../src/text/pdf.js";
 import { textFromContent } from "../src/text/melt.js";
 import { fixture } from "./helpers.js";
@@ -32,6 +32,22 @@ function scriptOf(paragraphs: Paragraph[]): Script {
 }
 
 describe("formatted text", () => {
+  it("continues a paragraph on the next page", () => {
+    const filler = Array.from({ length: 26 }, () => paragraph("action", "A short line of action."));
+    const words = Array.from({ length: 240 }, () => "word").join(" ");
+    const script = scriptOf([...filler, paragraph("action", words)]);
+    const pieces = pagePieces(script);
+    const hits = pieces.flatMap((page, pageIndex) =>
+      page.filter((piece) => piece.index === filler.length).map((piece) => ({ pageIndex, ...piece })),
+    );
+    assert.ok(hits.length >= 2);
+    assert.equal(
+      hits.map((piece) => words.slice(piece.start, piece.end)).join(""),
+      words,
+    );
+    assert.ok(hits[1]!.pageIndex > hits[0]!.pageIndex);
+  });
+
   it("assigns a page to every paragraph", () => {
     const script = readFountain(fixture("kitchen.fountain"));
     const pages = paragraphPages(script);
