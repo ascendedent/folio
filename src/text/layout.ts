@@ -244,60 +244,61 @@ function buildLines(script: Script): BuiltLine[] {
   return assignGroups(lines);
 }
 
+function isGap(line: BuiltLine | undefined): boolean {
+  return line?.kind === "blank" || line?.kind === "page-break";
+}
+
 /**
- * Scene headings stay with the next line. A character cue stays with its
- * parenthetical and the first line of dialogue. Longer speeches may split.
+ * Each block moves to the next page whole: a speech from its cue to its last
+ * line, and an action paragraph. A scene heading keeps only the first two
+ * lines under it; the rest of that paragraph may continue on the next page.
+ * Only a block longer than a page splits.
  */
 function assignGroups(lines: BuiltLine[]): BuiltLine[] {
   const grouped = lines.map((line) => ({ ...line, group: 0 }));
-  let nextGroup = 1;
-  for (let index = 0; index < grouped.length; index += 1) {
-    const line = grouped[index];
-    if (!line || line.kind === "blank" || line.kind === "page-break") continue;
-    if (line.kind === "scene-heading") {
-      const group = nextGroup;
-      nextGroup += 1;
-      line.group = group;
-      let cursor = index + 1;
-      let attached = false;
-      while (cursor < grouped.length && !attached) {
-        const candidate = grouped[cursor];
-        if (!candidate || candidate.kind === "page-break") break;
-        candidate.group = group;
-        if (candidate.kind !== "blank") attached = true;
-        cursor += 1;
-      }
+  const runEnd = (from: number): number => {
+    let end = from;
+    while (end < grouped.length && !isGap(grouped[end])) end += 1;
+    return end;
+  };
+  const mark = (from: number, to: number, group: number): void => {
+    for (let at = from; at < to; at += 1) {
+      const line = grouped[at];
+      if (line) line.group = group;
+    }
+  };
+  let nextGroup = 0;
+  let index = 0;
+  while (index < grouped.length) {
+    if (isGap(grouped[index])) {
+      index += 1;
       continue;
     }
-    if (line.kind === "character") {
-      const group = line.group !== 0 ? line.group : nextGroup;
-      if (line.group === 0) nextGroup += 1;
-      line.group = group;
-      let cursor = index;
-      let sawDialogue = false;
-      while (cursor < grouped.length) {
-        const candidate = grouped[cursor];
-        if (!candidate) break;
-        if (candidate.kind === "page-break") break;
-        if (candidate.kind === "blank" && cursor !== index) break;
-        if (
-          candidate.kind !== "character" &&
-          candidate.kind !== "parenthetical" &&
-          candidate.kind !== "dialogue" &&
-          candidate.kind !== "blank"
-        ) {
-          break;
-        }
-        if (candidate.kind === "dialogue") {
-          if (sawDialogue) break;
-          sawDialogue = true;
-          candidate.group = group;
-          break;
-        }
-        candidate.group = group;
-        cursor += 1;
-      }
+    nextGroup += 1;
+    let end = runEnd(index);
+    if (grouped[index]?.kind !== "scene-heading") {
+      mark(index, end, nextGroup);
+      index = end;
+      continue;
     }
+    let body = index;
+    while (body < end && grouped[body]?.kind === "scene-heading") body += 1;
+    mark(index, body, nextGroup);
+    if (body === end) {
+      // The paragraph under the heading follows a blank line.
+      let next = end;
+      while (grouped[next]?.kind === "blank") next += 1;
+      if (next >= grouped.length || isGap(grouped[next])) {
+        index = end;
+        continue;
+      }
+      mark(end, next, nextGroup);
+      body = next;
+      end = runEnd(next);
+    }
+    const speech = grouped[body]?.kind === "character" || grouped[body]?.kind === "dialogue";
+    mark(body, speech ? end : Math.min(end, body + 2), nextGroup);
+    index = end;
   }
   return grouped;
 }

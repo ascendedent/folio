@@ -35,7 +35,7 @@ function scriptOf(paragraphs: Paragraph[]): Script {
 describe("formatted text", () => {
   it("continues a paragraph on the next page", () => {
     const filler = Array.from({ length: 26 }, () => paragraph("action", "A short line of action."));
-    const words = Array.from({ length: 240 }, () => "word").join(" ");
+    const words = Array.from({ length: 700 }, () => "word").join(" ");
     const script = scriptOf([...filler, paragraph("action", words)]);
     const pieces = pagePieces(script);
     const hits = pieces.flatMap((page, pageIndex) =>
@@ -169,6 +169,44 @@ describe("formatted text", () => {
     pullOrphans(pages);
     assert.equal(pages[0]?.lines.some((line) => line.kind === "scene-heading"), false);
     assert.equal(pages[1]?.lines[0]?.kind, "scene-heading");
+  });
+
+  describe("moves a block whole when it would cross a page", () => {
+    // 26 one-line paragraphs with gaps fill 51 of the 54 lines.
+    const filler = (count = 26): Paragraph[] => Array.from({ length: count }, (_unused, index) => paragraph("action", `Beat ${index + 1}.`));
+    const pagesOf = (script: Script, origins: number[]): number[] => {
+      const pages = layoutScript(script);
+      return origins.map((origin) => pages.findIndex((page) => page.lines.some((line) => line.origin === origin)));
+    };
+
+    it("keeps a whole speech together", () => {
+      const lines = "This speech runs to four lines of dialogue so it cannot fit in the three lines left on the page.";
+      // Five lines left: room for the cue and a first line, but not the whole speech.
+      const script = scriptOf([...filler(25), paragraph("character", "MAYA"), paragraph("parenthetical", "quiet"), paragraph("dialogue", lines)]);
+      assert.deepEqual(pagesOf(script, [25, 26, 27]), [1, 1, 1]);
+      assert.ok(pageMarks(script).every((mark) => !mark.more && !mark.continuedName));
+    });
+
+    it("keeps a whole action paragraph together", () => {
+      const lines = "She crosses the kitchen, opens every drawer in turn, finds nothing in any of them, and finally sits down at the table to wait for the kettle.";
+      const script = scriptOf([...filler(), paragraph("action", lines)]);
+      const pages = layoutScript(script);
+      assert.ok(pages[0]?.lines.every((line) => line.origin !== 26));
+      assert.ok(pages[1]?.lines.some((line) => line.origin === 26));
+    });
+
+    it("keeps a scene heading with the first two lines under it, and lets the rest continue", () => {
+      const lines = "Rain beats on the window while she waits at the table, watching the door and counting the minutes until he comes back in out of the storm, soaked to the skin and carrying nothing at all.";
+      // One line left after the gap: the heading would sit alone, so it moves with its paragraph.
+      const script = scriptOf([...filler(), paragraph("scene-heading", "INT. KITCHEN - NIGHT"), paragraph("action", lines)]);
+      assert.deepEqual(pagesOf(script, [26, 27]), [1, 1]);
+      // Three lines left: the heading stays, its paragraph fills the page and the last line continues overleaf.
+      const roomy = scriptOf([...filler(25), paragraph("scene-heading", "INT. KITCHEN - NIGHT"), paragraph("action", lines)]);
+      const pages = layoutScript(roomy);
+      assert.ok(pages[0]?.lines.some((line) => line.origin === 25));
+      assert.equal(pages[0]?.lines.filter((line) => line.origin === 26).length, 3);
+      assert.equal(pages[1]?.lines.filter((line) => line.origin === 26).length, 1);
+    });
   });
 
   it("writes an RTF document in Courier", () => {
