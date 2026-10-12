@@ -177,7 +177,6 @@ function blockLines(paragraph: Paragraph): BuiltLine[] {
 function wantsGap(kind: ElementKind, previous: ElementKind | null): boolean {
   if (!previous) return false;
   if (kind === "dialogue" || kind === "parenthetical" || kind === "note" || kind === "page-break") return false;
-  if (previous === "scene-heading" && (kind === "action" || kind === "character" || kind === "shot")) return false;
   return true;
 }
 

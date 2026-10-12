@@ -88,11 +88,24 @@ describe("formatted text", () => {
   it("keeps a full PDF page inside one-inch margins", () => {
     const script = scriptOf(Array.from({ length: 200 }, (_unused, index) => paragraph("action", `Beat ${index + 1}.`)));
     const pdf = new TextDecoder().decode(formatPdf(script));
-    const leading = Number(/(\d+) TL/.exec(pdf)?.[1]);
-    const [, top, gap] = /\d+ (\d+) Td[\s\S]*?0 -(\d+) Td/.exec(pdf) ?? [];
-    const lastBaseline = Number(top) - Number(gap) - (LINES_PER_PAGE - 1) * leading;
-    assert.ok(Number(top) - Number(gap) <= 792 - 72, "body starts below the top margin");
-    assert.ok(lastBaseline - 3 >= 72, `last line sits at ${lastBaseline}, inside the bottom margin`);
+    const baselines = [...pdf.matchAll(/1 0 0 1 [\d.]+ (-?\d+) Tm \(Beat/g)].map((match) => Number(match[1]));
+    assert.ok(Math.max(...baselines) <= 792 - 72 - 9, "body starts below the top margin");
+    assert.ok(Math.min(...baselines) - 3 >= 72, `last line sits at ${Math.min(...baselines)}, inside the bottom margin`);
+  });
+
+  it("draws the PDF header and blank lines the way the editor does", () => {
+    const script = scriptOf([
+      paragraph("scene-heading", "INT. KITCHEN - NIGHT"),
+      paragraph("action", "She waits."),
+      ...Array.from({ length: 40 }, (_unused, index) => paragraph("action", `Beat ${index + 1}.`)),
+    ]);
+    script.titlePage = [{ type: "Title", text: "Wrap Party" }];
+    const pdf = new TextDecoder().decode(formatPdf(script));
+    const y = (text: string): number => Number(new RegExp(`(\\d+) Tm \\(${text}`).exec(pdf)?.[1]);
+    assert.equal(y("INT. KITCHEN") - y("She waits"), 24, "a blank line after the scene heading");
+    assert.doesNotMatch(pdf, /\(1\.\) Tj/, "no number on page one");
+    assert.match(pdf, /\(Wrap Party\) Tj/);
+    assert.match(pdf, /\(2\.\) Tj/);
   });
 
   it("prints MORE and a continued cue when a speech crosses a page", () => {
@@ -197,15 +210,15 @@ describe("formatted text", () => {
 
     it("keeps a scene heading with the first two lines under it, and lets the rest continue", () => {
       const lines = "Rain beats on the window while she waits at the table, watching the door and counting the minutes until he comes back in out of the storm, soaked to the skin and carrying nothing at all.";
-      // One line left after the gap: the heading would sit alone, so it moves with its paragraph.
+      // No room under the heading: it moves with its paragraph.
       const script = scriptOf([...filler(), paragraph("scene-heading", "INT. KITCHEN - NIGHT"), paragraph("action", lines)]);
       assert.deepEqual(pagesOf(script, [26, 27]), [1, 1]);
-      // Three lines left: the heading stays, its paragraph fills the page and the last line continues overleaf.
+      // Room for the heading, its blank line and two lines: those stay, the rest continues overleaf.
       const roomy = scriptOf([...filler(25), paragraph("scene-heading", "INT. KITCHEN - NIGHT"), paragraph("action", lines)]);
       const pages = layoutScript(roomy);
       assert.ok(pages[0]?.lines.some((line) => line.origin === 25));
-      assert.equal(pages[0]?.lines.filter((line) => line.origin === 26).length, 3);
-      assert.equal(pages[1]?.lines.filter((line) => line.origin === 26).length, 1);
+      assert.equal(pages[0]?.lines.filter((line) => line.origin === 26).length, 2);
+      assert.equal(pages[1]?.lines.filter((line) => line.origin === 26).length, 2);
     });
   });
 

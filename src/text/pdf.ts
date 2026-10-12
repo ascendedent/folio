@@ -1,11 +1,13 @@
-import type { Script } from "../model.js";
-import { layoutScript, type LayoutPage } from "./layout.js";
+import { displayPage } from "../edit.js";
+import { scriptTitle, type Script } from "../model.js";
+import { CHARACTER_INDENT, layoutScript, pageMarks, type LayoutPage, type PageMark } from "./layout.js";
 
 /** Courier is one of the standard PDF fonts, so the pages match the formatted text. */
 export function formatPdf(script: Script, options?: { watermark?: string }): Uint8Array {
   const pages = layoutScript(script);
+  const marks = pageMarks(script);
   const watermark = (options?.watermark ?? "").toUpperCase();
-  const streams = pages.map((page) => pageStream(script, page, watermark));
+  const streams = pages.map((page, index) => pageStream(script, page, index, marks[index], watermark));
   const objects: string[] = ["<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>"];
   const contentIds: number[] = [];
   for (const stream of streams) {
@@ -52,24 +54,52 @@ function pdfText(value: string): string {
   return ascii.replace(/\\/gu, "\\\\").replace(/\(/gu, "\\(").replace(/\)/gu, "\\)");
 }
 
-function pageStream(script: Script, page: LayoutPage, watermark: string): string {
-  // Six lines to the inch: the number sits half an inch down, and the 54 body lines fill the
-  // nine inches between one-inch margins.
-  const lines = ["BT", "/F 12 Tf", "12 TL", "72 747 Td"];
-  const label = pageLabel(script, page).padStart(58);
-  lines.push(`(${pdfText(label)}) Tj`, "0 -36 Td");
-  for (const line of page.lines) {
-    const star = line.origin !== undefined && revised(script, line.origin) ? "* " : "";
-    const scene =
-      line.kind === "scene-heading" && line.origin !== undefined ? sceneNumber(script, line.origin) : "";
-    const color = line.origin !== undefined && line.kind === "scene-heading" ? storyColor(script, line.origin) : "";
-    if (color) lines.push(color);
-    lines.push(`(${pdfText(`${scene}${star}${line.text}`.slice(0, 96))}) Tj`, "T*");
-    if (color) lines.push("0 0 0 rg");
+// Letter paper in points. Courier 12 is 7.2 points a character and six lines to the inch.
+const LEFT = 108;
+const RIGHT = 540;
+const CHAR = 7.2;
+const LEADING = 12;
+const HEADER_BASELINE = 747;
+const BODY_BASELINE = 711;
+
+/** Lay out a page the way the editor draws its sheet: title and number on top, then the body. */
+function pageStream(script: Script, page: LayoutPage, pageIndex: number, mark: PageMark | undefined, watermark: string): string {
+  const ops: string[] = ["/F 12 Tf"];
+  const text = (x: number, y: number, value: string): void => {
+    ops.push(`BT 1 0 0 1 ${x.toFixed(1)} ${y} Tm (${pdfText(value)}) Tj ET`);
+  };
+  if (pageIndex > 0) {
+    const title = scriptTitle(script).slice(0, 40);
+    if (title) text(LEFT, HEADER_BASELINE, title);
+    const label = `${pageLabel(script, page, pageIndex)}.`;
+    text(RIGHT - label.length * CHAR, HEADER_BASELINE, label);
   }
-  lines.push("ET");
-  if (watermark) lines.push("BT", "/F 18 Tf", "1 0 0 1 140 400 Tm", `(${pdfText(watermark)}) Tj`, "ET");
-  return lines.join("\n");
+  let row = 0;
+  const cue = (value: string): void => text(LEFT + CHARACTER_INDENT * CHAR, BODY_BASELINE - row * LEADING, value);
+  if (mark?.continuedName) {
+    cue(`${mark.continuedName} (CONT'D)`);
+    row += 2;
+  }
+  for (const line of page.lines) {
+    const y = BODY_BASELINE - row * LEADING;
+    row += 1;
+    if (!line.text) continue;
+    const color = line.origin !== undefined && line.kind === "scene-heading" ? storyColor(script, line.origin) : "";
+    if (color) ops.push(color);
+    text(LEFT, y, line.text.slice(0, 96));
+    if (color) ops.push("0 0 0 rg");
+    if (line.kind === "scene-heading" && line.origin !== undefined) {
+      const scene = sceneNumber(script, line.origin);
+      if (scene) text(LEFT - (scene.length + 2) * CHAR, y, scene);
+    }
+    if (line.origin !== undefined && revised(script, line.origin)) text(RIGHT + 2 * CHAR, y, "*");
+  }
+  if (mark?.more) {
+    row += 1;
+    cue("(MORE)");
+  }
+  if (watermark) ops.push("BT", "/F 18 Tf", "1 0 0 1 140 400 Tm", `(${pdfText(watermark)}) Tj`, "ET");
+  return ops.join("\n");
 }
 
 function revised(script: Script, index: number): boolean {
@@ -78,26 +108,12 @@ function revised(script: Script, index: number): boolean {
 
 function sceneNumber(script: Script, index: number): string {
   const number = script.paragraphs[index]?.sceneNumber;
-  return number ? `${number}. ` : "";
+  return number ? `${number}.` : "";
 }
 
-function pageLabel(script: Script, page: LayoutPage): string {
+function pageLabel(script: Script, page: LayoutPage, pageIndex: number): string {
   const origin = page.lines.find((line) => line.origin !== undefined)?.origin;
-  if (origin === undefined) return `${page.number}.`;
-  const stamped = script.paragraphs[origin]?.attributes.FolioPage;
-  if (stamped) return `${stamped}.`;
-  let base = String(page.number);
-  for (let cursor = origin - 1; cursor >= 0; cursor -= 1) {
-    const earlier = script.paragraphs[cursor]?.attributes.FolioPage;
-    if (earlier) {
-      base = earlier;
-      break;
-    }
-  }
-  if (!script.paragraphs.some((paragraph) => paragraph.attributes.FolioLocked === "1")) return `${page.number}.`;
-  const match = /^(\d+)([A-Z]?)$/u.exec(base);
-  const letter = match?.[2] ? String.fromCharCode(match[2].charCodeAt(0) + 1) : "A";
-  return `${match?.[1] ?? page.number}${letter}.`;
+  return origin === undefined ? String(pageIndex + 1) : displayPage(script, origin, pageIndex + 1);
 }
 
 function storyColor(script: Script, index: number): string {
