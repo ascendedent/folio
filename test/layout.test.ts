@@ -108,6 +108,28 @@ describe("formatted text", () => {
     assert.match(pdf, /\(2\.\) Tj/);
   });
 
+  it("puts the title page first in the PDF, and leaves it out when there is none", () => {
+    const script = scriptOf([paragraph("scene-heading", "INT. KITCHEN - NIGHT"), paragraph("action", "She waits.")]);
+    const plain = new TextDecoder().decode(formatPdf(script));
+    assert.match(plain, /\/Count 1 /);
+    script.titlePage = [
+      { type: "Title", text: "Wrap Party" },
+      { type: "Credit", text: "Written by" },
+      { type: "Author", text: "Joe Marotta" },
+      { type: "Contact", text: "joe@example.com\n555 0100" },
+      { type: "Source", text: "" },
+      { type: "Draft date", text: "  " },
+    ];
+    const pdf = new TextDecoder().decode(formatPdf(script));
+    assert.match(pdf, /\/Count 2 /);
+    // Only what was typed prints: no field names, and nothing for an empty field.
+    assert.doesNotMatch(pdf, /\((Title|Credit|Author|Contact|Source|Draft date)\b/i);
+    const cover = pdf.slice(0, pdf.indexOf("(INT. KITCHEN"));
+    assert.equal([...cover.matchAll(/\) Tj ET/g)].length, 5);
+    const order = ["WRAP PARTY", "Written by", "Joe Marotta", "joe@example.com", "INT. KITCHEN"].map((text) => pdf.indexOf(`(${text}`));
+    assert.ok(order.every((at, index) => at > 0 && (index === 0 || at > (order[index - 1] ?? 0))));
+  });
+
   it("prints MORE and a continued cue when a speech crosses a page", () => {
     const speech = Array.from({ length: 200 }, (_unused, index) => `Line ${index + 1} keeps going`).join(" ");
     const script = scriptOf([

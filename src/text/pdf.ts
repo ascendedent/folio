@@ -1,6 +1,6 @@
 import { displayPage } from "../edit.js";
 import { scriptTitle, type Script } from "../model.js";
-import { CHARACTER_INDENT, layoutScript, pageMarks, type LayoutPage, type PageMark } from "./layout.js";
+import { ACTION_WIDTH, CHARACTER_INDENT, layoutScript, pageMarks, wrapText, type LayoutPage, type PageMark } from "./layout.js";
 
 /** Courier is one of the standard PDF fonts, so the pages match the formatted text. */
 export function formatPdf(script: Script, options?: { watermark?: string }): Uint8Array {
@@ -8,6 +8,8 @@ export function formatPdf(script: Script, options?: { watermark?: string }): Uin
   const marks = pageMarks(script);
   const watermark = (options?.watermark ?? "").toUpperCase();
   const streams = pages.map((page, index) => pageStream(script, page, index, marks[index], watermark));
+  const cover = titleStream(script);
+  if (cover) streams.unshift(cover);
   const objects: string[] = ["<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>"];
   const contentIds: number[] = [];
   for (const stream of streams) {
@@ -99,6 +101,51 @@ function pageStream(script: Script, page: LayoutPage, pageIndex: number, mark: P
     cue("(MORE)");
   }
   if (watermark) ops.push("BT", "/F 18 Tf", "1 0 0 1 140 400 Tm", `(${pdfText(watermark)}) Tj`, "ET");
+  return ops.join("\n");
+}
+
+function fieldText(script: Script, ...types: string[]): string[] {
+  return script.titlePage
+    .filter((field) => types.includes(field.type.toLowerCase()))
+    .flatMap((field) => field.text.split("\n"))
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+const PLACED = ["title", "credit", "author", "authors", "source", "draft date", "date", "revision", "contact", "copyright"];
+
+/** The title page: title a third of the way down, credits under it, contact and draft date at the foot. */
+function titleStream(script: Script): string {
+  if (!script.titlePage.some((field) => field.text.trim())) return "";
+  const ops: string[] = ["/F 12 Tf"];
+  const text = (x: number, y: number, value: string): void => {
+    ops.push(`BT 1 0 0 1 ${x.toFixed(1)} ${y} Tm (${pdfText(value)}) Tj ET`);
+  };
+  const centered = (y: number, value: string): void => text((612 - value.length * CHAR) / 2, y, value);
+  let y = 528;
+  const block = (lines: string[], gapAfter: number): void => {
+    if (lines.length === 0) return;
+    for (const line of lines.flatMap((item) => wrapText(item, ACTION_WIDTH))) {
+      centered(y, line);
+      y -= LEADING;
+    }
+    y -= gapAfter * LEADING;
+  };
+  block(fieldText(script, "title").map((line) => line.toUpperCase()), 3);
+  block(fieldText(script, "credit"), 1);
+  block(fieldText(script, "author", "authors"), 3);
+  block(fieldText(script, "source"), 2);
+  // Title pages read from Final Draft carry plain lines with no field names.
+  const loose = script.titlePage.filter((field) => !PLACED.includes(field.type.toLowerCase()));
+  block(loose.flatMap((field) => field.text.split("\n").map((line) => line.trim())).filter(Boolean), 0);
+
+  const contact = [...fieldText(script, "contact"), ...fieldText(script, "copyright")];
+  contact.forEach((line, index) => text(LEFT, 72 + 12 + (contact.length - 1 - index) * LEADING, line.slice(0, 40)));
+  const dated = fieldText(script, "draft date", "date", "revision");
+  dated.forEach((line, index) => {
+    const value = line.slice(0, 30);
+    text(RIGHT - value.length * CHAR, 72 + 12 + (dated.length - 1 - index) * LEADING, value);
+  });
   return ops.join("\n");
 }
 
