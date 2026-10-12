@@ -85,6 +85,16 @@ describe("formatted text", () => {
     assert.equal(textFromContent("BT (INT. KITCHEN - NIGHT) Tj ET"), "INT. KITCHEN - NIGHT");
   });
 
+  it("keeps a full PDF page inside one-inch margins", () => {
+    const script = scriptOf(Array.from({ length: 200 }, (_unused, index) => paragraph("action", `Beat ${index + 1}.`)));
+    const pdf = new TextDecoder().decode(formatPdf(script));
+    const leading = Number(/(\d+) TL/.exec(pdf)?.[1]);
+    const [, top, gap] = /\d+ (\d+) Td[\s\S]*?0 -(\d+) Td/.exec(pdf) ?? [];
+    const lastBaseline = Number(top) - Number(gap) - (LINES_PER_PAGE - 1) * leading;
+    assert.ok(Number(top) - Number(gap) <= 792 - 72, "body starts below the top margin");
+    assert.ok(lastBaseline - 3 >= 72, `last line sits at ${lastBaseline}, inside the bottom margin`);
+  });
+
   it("prints MORE and a continued cue when a speech crosses a page", () => {
     const speech = Array.from({ length: 200 }, (_unused, index) => `Line ${index + 1} keeps going`).join(" ");
     const script = scriptOf([

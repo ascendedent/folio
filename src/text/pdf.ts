@@ -53,9 +53,11 @@ function pdfText(value: string): string {
 }
 
 function pageStream(script: Script, page: LayoutPage, watermark: string): string {
-  const lines = ["BT", "/F 12 Tf", "14 TL", "72 748 Td"];
+  // Six lines to the inch: the number sits half an inch down, and the 54 body lines fill the
+  // nine inches between one-inch margins.
+  const lines = ["BT", "/F 12 Tf", "12 TL", "72 747 Td"];
   const label = pageLabel(script, page).padStart(58);
-  lines.push(`(${pdfText(label)}) Tj`, "T*");
+  lines.push(`(${pdfText(label)}) Tj`, "0 -36 Td");
   for (const line of page.lines) {
     const star = line.origin !== undefined && revised(script, line.origin) ? "* " : "";
     const scene =
