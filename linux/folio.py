@@ -31,6 +31,7 @@ ROOT = Path(__file__).resolve().parent / "studio"
 ICON = Path(__file__).resolve().parent / "favicon.png"
 APP_ID = "com.joemarotta.folio"
 LAST_OPEN = Path(__file__).resolve().parent / "last-open.json"
+EXPORT_FOLDERS = Path(__file__).resolve().parent / "export-folders.json"
 
 
 def mime_for(path: Path) -> str:
@@ -241,15 +242,17 @@ class Folio(Gtk.Application):
         if window is None:
             download.cancel()
             return True
+        name = suggested or "screenplay.fdx"
         chooser = Gtk.FileChooserNative.new("Save", window, Gtk.FileChooserAction.SAVE, "Save", "Cancel")
-        chooser.set_current_name(suggested or "screenplay.fdx")
-        downloads = Path.home() / "Downloads"
-        if downloads.is_dir():
-            chooser.set_current_folder(str(downloads))
+        chooser.set_current_name(name)
+        chooser.set_current_folder(str(export_folder(name)))
         response = chooser.run()
         if response == Gtk.ResponseType.ACCEPT and chooser.get_uri():
             download.set_allow_overwrite(True)
             download.set_destination(chooser.get_uri())
+            picked = chooser.get_filename()
+            if picked:
+                remember_export(name, Path(picked).parent)
         else:
             download.cancel()
         return True
@@ -257,6 +260,45 @@ class Folio(Gtk.Application):
 
 def remember_open(path: Path) -> None:
     LAST_OPEN.write_text(json.dumps({"name": path.name, "path": str(path)}), encoding="utf-8")
+
+
+def read_export_folders() -> dict:
+    try:
+        data = json.loads(EXPORT_FOLDERS.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def export_folder(name: str) -> Path:
+    """Where this script was last exported, else beside the open script, else the last export folder."""
+    data = read_export_folders()
+    scripts = data.get("scripts") if isinstance(data.get("scripts"), dict) else {}
+    stem = Path(name).stem.lower()
+    candidates = [scripts.get(stem)]
+    try:
+        opened = Path(str(json.loads(LAST_OPEN.read_text(encoding="utf-8")).get("path") or ""))
+        if opened.stem.lower() == stem:
+            candidates.append(str(opened.parent))
+    except (OSError, json.JSONDecodeError):
+        pass
+    candidates += [data.get("last"), str(Path.home() / "Downloads"), str(Path.home())]
+    for candidate in candidates:
+        if candidate and Path(str(candidate)).is_dir():
+            return Path(str(candidate))
+    return Path.home()
+
+
+def remember_export(name: str, folder: Path) -> None:
+    data = read_export_folders()
+    scripts = data.get("scripts") if isinstance(data.get("scripts"), dict) else {}
+    scripts[Path(name).stem.lower()] = str(folder)
+    data["scripts"] = scripts
+    data["last"] = str(folder)
+    try:
+        EXPORT_FOLDERS.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except OSError:
+        pass
 
 
 def last_opened(name: str) -> Path | None:

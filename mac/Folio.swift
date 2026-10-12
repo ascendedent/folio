@@ -175,14 +175,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     completionHandler: @escaping (URL?) -> Void
   ) {
     DispatchQueue.main.async {
+      let name = suggestedFilename.isEmpty ? "screenplay.fdx" : suggestedFilename
       let panel = NSSavePanel()
       panel.title = "Save"
-      panel.nameFieldStringValue = suggestedFilename.isEmpty ? "screenplay.fdx" : suggestedFilename
+      panel.nameFieldStringValue = name
       panel.canCreateDirectories = true
+      panel.directoryURL = self.exportFolder(for: name)
       panel.beginSheetModal(for: self.window) { result in
+        if result == .OK, let url = panel.url {
+          self.rememberExport(name, folder: url.deletingLastPathComponent())
+        }
         completionHandler(result == .OK ? panel.url : nil)
       }
     }
+  }
+
+  private static let exportFoldersKey = "FolioExportFolders"
+  private static let lastExportKey = "FolioLastExportFolder"
+
+  private func exportKey(_ name: String) -> String {
+    (name as NSString).deletingPathExtension.lowercased()
+  }
+
+  /// Where this script was last exported, else the last export folder, else Downloads.
+  private func exportFolder(for name: String) -> URL? {
+    let defaults = UserDefaults.standard
+    let scripts = defaults.dictionary(forKey: Self.exportFoldersKey) as? [String: String] ?? [:]
+    let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first?.path
+    for path in [scripts[exportKey(name)], defaults.string(forKey: Self.lastExportKey), downloads] {
+      var isDir: ObjCBool = false
+      if let path, FileManager.default.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue {
+        return URL(fileURLWithPath: path, isDirectory: true)
+      }
+    }
+    return nil
+  }
+
+  private func rememberExport(_ name: String, folder: URL) {
+    let defaults = UserDefaults.standard
+    var scripts = defaults.dictionary(forKey: Self.exportFoldersKey) as? [String: String] ?? [:]
+    scripts[exportKey(name)] = folder.path
+    defaults.set(scripts, forKey: Self.exportFoldersKey)
+    defaults.set(folder.path, forKey: Self.lastExportKey)
   }
 
   func webView(
