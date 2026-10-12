@@ -112,11 +112,23 @@ function fieldText(script: Script, ...types: string[]): string[] {
     .filter(Boolean);
 }
 
+/** Placeholder lines from Final Draft's title page template. */
+const TEMPLATE_FILLER = new Set([
+  "script title",
+  "name of first writer",
+  "name of second writer",
+  "based on, if any",
+  "address",
+  "phone number",
+  "email address",
+  "email",
+]);
+
 const PLACED = ["title", "credit", "author", "authors", "source", "draft date", "date", "revision", "contact", "copyright"];
 
 /** The title page: title a third of the way down, credits under it, contact and draft date at the foot. */
 function titleStream(script: Script): string {
-  if (!script.titlePage.some((field) => field.text.trim())) return "";
+  if (!script.titlePage.some((field) => field.text.trim() && !TEMPLATE_FILLER.has(field.text.trim().toLowerCase()))) return "";
   const ops: string[] = ["/F 12 Tf"];
   const text = (x: number, y: number, value: string): void => {
     ops.push(`BT 1 0 0 1 ${x.toFixed(1)} ${y} Tm (${pdfText(value)}) Tj ET`);
@@ -135,9 +147,17 @@ function titleStream(script: Script): string {
   block(fieldText(script, "credit"), 1);
   block(fieldText(script, "author", "authors"), 3);
   block(fieldText(script, "source"), 2);
-  // Title pages read from Final Draft carry plain lines with no field names.
-  const loose = script.titlePage.filter((field) => !PLACED.includes(field.type.toLowerCase()));
-  block(loose.flatMap((field) => field.text.split("\n").map((line) => line.trim())).filter(Boolean), 0);
+  // Title pages read from Final Draft carry plain lines with no field names. The editor's title page
+  // does not show them, so they print only when no field is filled in, and never as template filler.
+  if (!script.titlePage.some((field) => PLACED.includes(field.type.toLowerCase()) && field.text.trim())) {
+    const loose = script.titlePage.filter((field) => !PLACED.includes(field.type.toLowerCase()));
+    block(
+      loose
+        .flatMap((field) => field.text.split("\n").map((line) => line.trim()))
+        .filter((line) => line && !TEMPLATE_FILLER.has(line.toLowerCase())),
+      0,
+    );
+  }
 
   const contact = [...fieldText(script, "contact"), ...fieldText(script, "copyright")];
   contact.forEach((line, index) => text(LEFT, 72 + 12 + (contact.length - 1 - index) * LEADING, line.slice(0, 40)));

@@ -130,6 +130,19 @@ describe("formatted text", () => {
     assert.ok(order.every((at, index) => at > 0 && (index === 0 || at > (order[index - 1] ?? 0))));
   });
 
+  it("leaves Final Draft template lines off the PDF title page", () => {
+    const script = scriptOf([paragraph("action", "She waits.")]);
+    const general = (text: string) => ({ type: "General", text });
+    script.titlePage = [general(""), general("Script Title"), general("Written by"), general("Name of First Writer"), general("Phone Number")];
+    script.titlePage.push({ type: "Title", text: "Wrap Party" }, { type: "Author", text: "Joe Marotta" });
+    const pdf = new TextDecoder().decode(formatPdf(script));
+    assert.match(pdf, /\(WRAP PARTY\) Tj/);
+    assert.doesNotMatch(pdf, /Script Title|Written by|Name of First Writer|Phone Number/);
+    // A template no one filled in makes no title page at all.
+    script.titlePage = [general("Script Title"), general("Name of First Writer"), general("Phone Number")];
+    assert.match(new TextDecoder().decode(formatPdf(script)), /\/Count 1 /);
+  });
+
   it("prints MORE and a continued cue when a speech crosses a page", () => {
     const speech = Array.from({ length: 200 }, (_unused, index) => `Line ${index + 1} keeps going`).join(" ");
     const script = scriptOf([
